@@ -51,13 +51,30 @@ namespace SporTotoFormApp
 
         private async void button1_Click(object sender, EventArgs e)
         {
+            if (!int.TryParse(textBox1.Text, out var kolonSayisi) || kolonSayisi <= 0)
+            {
+                Log("Lutfen gecerli bir kolon sayisi girin.", Color.OrangeRed);
+                return;
+            }
+
             button1.Enabled = false;
             progressBar1.Minimum = 0;
+            progressBar1.Value = 0;
+            rtb_log.Clear();
 
-            MoneyFilterService moneyFilterService = new MoneyFilterService(this, Convert.ToInt32(textBox1.Text));
-
-            await moneyFilterService.Run();
-            button1.Enabled = true;
+            try
+            {
+                MoneyFilterService moneyFilterService = new MoneyFilterService(this, kolonSayisi);
+                await moneyFilterService.Run();
+            }
+            catch (Exception ex)
+            {
+                Log($"Beklenmeyen hata: {ex.Message}", Color.Crimson);
+            }
+            finally
+            {
+                button1.Enabled = true;
+            }
 
         }
 
@@ -89,7 +106,7 @@ namespace SporTotoFormApp
 
         private void Form1_Load(object sender, EventArgs e)
         {
-
+            textBox1.Text = "30";
         }
 
         private void textBox1_TextChanged(object sender, EventArgs e)

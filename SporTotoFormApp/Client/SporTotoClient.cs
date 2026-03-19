@@ -1,105 +1,144 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using HtmlAgilityPack;
+﻿using HtmlAgilityPack;
+using System.Globalization;
+
 namespace SporTotoFormApp.Client
 {
-    public class SporTotoClient
+    public sealed class SporTotoClient
     {
         private readonly HttpClient _httpClient;
         private const string RequestUrl = "https://sporzip.com/spor-toto-ne-verir";
-        private const string SessionCookie = "PHPSESSID=9c6jh0vbkvlrkc9o4p1ertha85; __rev=9c6jh0vbkvlrkc9o4p1ertha85_1749158249_1";
 
-        public SporTotoClient()
+        public SporTotoClient(HttpClient? httpClient = null)
         {
-            _httpClient = new HttpClient();
-            _httpClient.DefaultRequestHeaders.Add("Cookie", SessionCookie);
+            _httpClient = httpClient ?? new HttpClient();
+            _httpClient.Timeout = TimeSpan.FromSeconds(20);
+
+            if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
+            {
+                _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) SporTotoFormApp/2.0");
+            }
         }
 
-        public async Task<List<BonusResult>> SubmitPredictionStringAsync(string predictionString)
+        public async Task<List<BonusResult>> SubmitPredictionStringAsync(string predictionString, CancellationToken cancellationToken = default)
         {
-            if (predictionString.Length != 15)
-                throw new ArgumentException("Tahmin stringi 15 karakter uzunluğunda olmalıdır.");
-
-            using (var formData = new MultipartFormDataContent())
+            if (string.IsNullOrWhiteSpace(predictionString) || predictionString.Length != 15)
             {
-                for (int i = 0; i < 15; i++)
-                {
-                    string fieldName = $"m_{i + 1}";
-                    string value = predictionString[i].ToString(); // "1", "X", veya "2"
-                    formData.Add(new StringContent(value), fieldName);
-                }
+                throw new ArgumentException("Tahmin stringi 15 karakter uzunluğunda olmalıdır.", nameof(predictionString));
+            }
+
+            const int maxRetry = 3;
+
+            for (var attempt = 1; attempt <= maxRetry; attempt++)
+            {
+                using var formData = CreateFormData(predictionString);
 
                 try
                 {
-                    var response = await _httpClient.PostAsync(RequestUrl, formData);
+                    using var response = await _httpClient.PostAsync(RequestUrl, formData, cancellationToken);
                     response.EnsureSuccessStatusCode();
-                    var html = await response.Content.ReadAsStringAsync();
-                    var bonusResults = ParseBonusResults(html);
 
-                    return bonusResults;
+                    var html = await response.Content.ReadAsStringAsync(cancellationToken);
+                    var parsed = ParseBonusResults(html);
+
+                    if (parsed.Count > 0)
+                    {
+                        return parsed;
+                    }
                 }
-                catch (Exception ex)
+                catch when (attempt < maxRetry)
                 {
-
-                    return null;
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken);
                 }
-
             }
+
+            return new List<BonusResult>();
+        }
+
+        private static MultipartFormDataContent CreateFormData(string predictionString)
+        {
+            var formData = new MultipartFormDataContent();
+            for (var i = 0; i < predictionString.Length; i++)
+            {
+                formData.Add(new StringContent(predictionString[i].ToString().ToLowerInvariant()), $"m_{i + 1}");
+            }
+
+            return formData;
         }
 
         public static List<BonusResult> ParseBonusResults(string html)
         {
             var results = new List<BonusResult>();
+            if (string.IsNullOrWhiteSpace(html))
+            {
+                return results;
+            }
 
             var doc = new HtmlAgilityPack.HtmlDocument();
             doc.LoadHtml(html);
 
             var rows = doc.DocumentNode.SelectNodes("//tr");
-            if (rows == null) return results;
+            if (rows == null)
+            {
+                return results;
+            }
 
             foreach (var row in rows)
             {
                 var cells = row.SelectNodes("td");
-                if (cells == null || cells.Count < 3) continue;
-
-                string bilen = cells[0].InnerText.Trim();
-                string kisiSayisi;
-                string tutar = cells[2].InnerText.Trim();
-
-                if (cells[1].InnerText.Trim().Contains("DEVİR"))
+                if (cells == null || cells.Count() < 3)
                 {
-                     kisiSayisi ="0";
-                }
-                else
-                {
-                    kisiSayisi = cells[1].InnerText.Split(' ')[0];
+                    continue;
                 }
 
-                // Sadece "BİLEN" geçen satırları al
-                if (bilen.Contains("BİLEN") && !string.IsNullOrWhiteSpace(tutar))
+                var bilen = HtmlEntity.DeEntitize(cells[0].InnerText).Trim();
+                if (!bilen.Contains("BİLEN", StringComparison.OrdinalIgnoreCase) &&
+                    !bilen.Contains("BILEN", StringComparison.OrdinalIgnoreCase))
                 {
-                    results.Add(new BonusResult
-                    {
-                        Bilen = bilen,
-                        KisiSayisi = kisiSayisi,
-                        Tutar = tutar
-                    });
+                    continue;
                 }
+
+                var kisiRaw = HtmlEntity.DeEntitize(cells[1].InnerText).Trim();
+                var tutar = HtmlEntity.DeEntitize(cells[2].InnerText).Trim();
+
+                var kisiSayisi = kisiRaw.Contains("DEVİR", StringComparison.OrdinalIgnoreCase)
+                    ? "0"
+                    : ExtractFirstNumberToken(kisiRaw);
+
+                results.Add(new BonusResult
+                {
+                    Bilen = bilen,
+                    KisiSayisi = kisiSayisi,
+                    Tutar = tutar
+                });
             }
 
             return results;
         }
+
+        private static string ExtractFirstNumberToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "0";
+            }
+
+            var token = value.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "0";
+            var cleaned = new string(token.Where(c => char.IsDigit(c) || c is '.' or ',').ToArray());
+
+            if (double.TryParse(cleaned.Replace('.', ',').Replace(",", "."), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+            {
+                return Math.Max(parsed, 0).ToString(CultureInfo.InvariantCulture);
+            }
+
+            return "0";
+        }
     }
 
-
-    public class BonusResult
+    public sealed class BonusResult
     {
-        public string Bilen { get; set; }
-        public string KisiSayisi { get; set; }
-        public string Tutar { get; set; }
+        public string Bilen { get; set; } = string.Empty;
+        public string KisiSayisi { get; set; } = "0";
+        public string Tutar { get; set; } = string.Empty;
 
         public override string ToString()
         {
