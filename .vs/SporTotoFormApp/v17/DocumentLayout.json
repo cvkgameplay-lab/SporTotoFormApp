@@ -1,0 +1,151 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\services\\moneyfilterservice.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\services\\moneyfilterservice.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\object\\bonus.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\object\\bonus.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\services\\predictionlisthelper.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\services\\predictionlisthelper.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\client\\sportotoclient.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\client\\sportotoclient.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\sportotoformapp\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\interfaces\\itestview.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\interfaces\\itestview.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|c:\\users\\h\u00FCseyin emre \u00E7evik\\source\\repos\\sportotoformapp\\sportotoformapp\\services\\excelexporter.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{8AD493D4-2108-44E7-B166-8FEBE15C0951}|SporTotoFormApp\\SporTotoFormApp.csproj|solutionrelative:sportotoformapp\\services\\excelexporter.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 3,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "PredictionListHelper.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\PredictionListHelper.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Services\\PredictionListHelper.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\PredictionListHelper.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Services\\PredictionListHelper.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAABEAAAAcAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T13:11:07.208Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "ExcelExporter.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\ExcelExporter.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Services\\ExcelExporter.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\ExcelExporter.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Services\\ExcelExporter.cs",
+              "ViewState": "AQIAAAMAAAAAAAAAAAAAAA0AAAAYAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:48:55.329Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "Bonus.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Object\\Bonus.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Object\\Bonus.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Object\\Bonus.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Object\\Bonus.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAYAAAAZAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:47:23.605Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "MoneyFilterService.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\MoneyFilterService.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Services\\MoneyFilterService.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Services\\MoneyFilterService.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Services\\MoneyFilterService.cs",
+              "ViewState": "AQIAACQAAAAAAAAAAAAowDsAAAA3AAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:45:14.584Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "ITestView.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Interfaces\\ITestView.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Interfaces\\ITestView.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Interfaces\\ITestView.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Interfaces\\ITestView.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAqwAMAAAAFAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-18T06:58:09.954Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "SporTotoClient.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Client\\SporTotoClient.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Client\\SporTotoClient.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Client\\SporTotoClient.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Client\\SporTotoClient.cs",
+              "ViewState": "AQIAACEAAAAAAAAAAAAtwCQAAAAUAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:42:46.172Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "Form1.cs",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Form1.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Form1.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Form1.cs",
+              "RelativeToolTip": "SporTotoFormApp\\Form1.cs",
+              "ViewState": "AQIAACEAAAAAAAAAAAAswCsAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:42:13.523Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "Form1.cs [Design]",
+              "DocumentMoniker": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Form1.cs",
+              "RelativeDocumentMoniker": "SporTotoFormApp\\Form1.cs",
+              "ToolTip": "C:\\Users\\H\u00FCseyin Emre \u00C7evik\\source\\repos\\SporTotoFormApp\\SporTotoFormApp\\Form1.cs [Design]",
+              "RelativeToolTip": "SporTotoFormApp\\Form1.cs [Design]",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-02-17T12:41:18.154Z"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
