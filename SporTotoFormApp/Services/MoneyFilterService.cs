@@ -11,15 +11,18 @@ namespace SporTotoFormApp.Services
         private readonly ITestView _view;
         private readonly OptimizationOptions _options;
 
-        public MoneyFilterService(ITestView view, int kolonSayisi)
+        public MoneyFilterService(ITestView view, int kolonSayisi, OptimizationOptions? uiOverrides = null)
         {
             _view = view;
-            _options = OptimizationOptions.Create(kolonSayisi);
+            _options = OptimizationOptions.Create(kolonSayisi, uiOverrides);
         }
 
         public async Task Run()
         {
             _view.Log("Pipeline baslatildi.", Color.Cyan);
+            _view.Log(
+                $"Ayarlar | i15: {_options.MinI15WinnerCount}-{_options.MaxI15WinnerCount} | TopK: {_options.InitialTopCandidateLimit} | CesitHavuz: {_options.DiversePrePoolLimit} | ApiCarpan: {_options.ApiBudgetMultiplier} | ApiEszamanlilik: {_options.ApiConcurrency} | MinDist: {_options.MinHammingDistance}/{_options.MinHammingDistanceFinal} | MC: {_options.MonteCarloScenarioCount}",
+                Color.LightSteelBlue);
 
             var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
             await TryRefreshHistoricalDataAsync(baseDirectory);
@@ -40,7 +43,10 @@ namespace SporTotoFormApp.Services
             _view.Log($"Cesitlilik sonrasi aday: {diversePrePool.Count}", Color.Yellow);
 
             var apiBudget = Math.Min(diversePrePool.Count, _options.GetApiBudget());
-            var apiCandidates = diversePrePool.Take(apiBudget).ToList();
+            var apiCandidates = diversePrePool
+                .Take(apiBudget)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
             _view.Log($"API degerlendirme butcesi: {apiCandidates.Count}", Color.Yellow);
             _view.ProgressBarMaxValue = _options.DesiredCouponCount;
@@ -55,6 +61,13 @@ namespace SporTotoFormApp.Services
                 model,
                 _options.DesiredCouponCount,
                 _options.MinHammingDistanceFinal);
+
+            var deduplicated = DeduplicateCoupons(selected);
+            if (deduplicated.Count != selected.Count)
+            {
+                _view.Log($"Duplicate kupon temizlendi: {selected.Count - deduplicated.Count}", Color.Orange);
+            }
+            selected = deduplicated;
 
             if (selected.Count < _options.DesiredCouponCount)
             {
@@ -75,7 +88,8 @@ namespace SporTotoFormApp.Services
             {
                 _view.Log("Gecmis sonuclar resmi API'den cekiliyor...", Color.DeepSkyBlue);
                 var updater = new HistoricalResultsUpdateService();
-                var refreshResult = await updater.RefreshAsync(baseDirectory);
+                using var refreshTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+                var refreshResult = await updater.RefreshAsync(baseDirectory, refreshTimeoutCts.Token);
 
                 if (refreshResult.Success)
                 {
@@ -85,6 +99,10 @@ namespace SporTotoFormApp.Services
                 {
                     _view.Log("Gecmis veri guncellenemedi, yerel dosya ile devam.", Color.Orange);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                _view.Log("Gecmis veri cekimi zaman asimina ugradi, yerel dosya ile devam.", Color.Orange);
             }
             catch (Exception ex)
             {
@@ -152,7 +170,7 @@ namespace SporTotoFormApp.Services
                     var i13 = GetKisiSayisi(result, "13");
                     var i12 = GetKisiSayisi(result, "12");
 
-                    if (i15 < 1 || i15 >= 10)
+                    if (i15 < _options.MinI15WinnerCount || i15 > _options.MaxI15WinnerCount)
                     {
                         return;
                     }
@@ -322,10 +340,17 @@ namespace SporTotoFormApp.Services
             {
                 var filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BestScoreCoupon.txt");
                 using var writer = new StreamWriter(filePath, false);
+                var seenPredictions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 foreach (var coupon in coupons)
                 {
-                    writer.WriteLine(coupon.prediction);
+                    var normalized = NormalizePrediction(coupon.prediction);
+                    if (!seenPredictions.Add(normalized))
+                    {
+                        continue;
+                    }
+
+                    writer.WriteLine(normalized);
                 }
 
                 _view.Log($"Kupon dosyasi yazildi: {filePath}", Color.Yellow);
@@ -359,6 +384,39 @@ namespace SporTotoFormApp.Services
 
                 _view.Log($"{i + 1}.Mac | 1:{count1} X:{countX} 2:{count2}", Color.Green);
             }
+        }
+
+        private static List<Coupon> DeduplicateCoupons(List<Coupon> coupons)
+        {
+            var result = new List<Coupon>(coupons.Count);
+            var seenPredictions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var coupon in coupons)
+            {
+                var normalized = NormalizePrediction(coupon.prediction);
+                if (!seenPredictions.Add(normalized))
+                {
+                    continue;
+                }
+
+                coupon.prediction = normalized;
+                result.Add(coupon);
+            }
+
+            return result;
+        }
+
+        private static string NormalizePrediction(string prediction)
+        {
+            if (string.IsNullOrWhiteSpace(prediction))
+            {
+                return string.Empty;
+            }
+
+            return new string(prediction
+                .Where(c => !char.IsWhiteSpace(c))
+                .Select(char.ToUpperInvariant)
+                .ToArray());
         }
 
         private sealed record ScoredCandidate(string Prediction, double Score);

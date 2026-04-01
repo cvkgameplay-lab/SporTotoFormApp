@@ -11,7 +11,7 @@ namespace SporTotoFormApp.Services
         public HistoricalResultsUpdateService(HttpClient? httpClient = null)
         {
             _httpClient = httpClient ?? new HttpClient();
-            _httpClient.Timeout = TimeSpan.FromSeconds(20);
+            _httpClient.Timeout = TimeSpan.FromSeconds(8);
             if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
             {
                 _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 SporTotoFormApp/2.0");
@@ -23,7 +23,10 @@ namespace SporTotoFormApp.Services
             var targetPath = ResolveHistoryFilePath(appBaseDirectory);
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
 
-            var historicalLines = await DownloadHistoricalLinesAsync(cancellationToken);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+
+            var historicalLines = await DownloadHistoricalLinesAsync(timeoutCts.Token);
             if (historicalLines.Count == 0)
             {
                 return new HistoricalRefreshResult(false, targetPath, 0);
@@ -43,11 +46,21 @@ namespace SporTotoFormApp.Services
             // Start from known historical range and continue until too many misses.
             for (var roundId = 300; roundId <= 900; roundId++)
             {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
                 var round = await TryGetRoundAsync(roundId, cancellationToken);
                 if (round == null)
                 {
                     notFoundStreak++;
-                    if (roundId > 500 && notFoundStreak >= 50)
+                    if (result.Count > 0 && notFoundStreak >= 12)
+                    {
+                        break;
+                    }
+
+                    if (roundId > 450 && notFoundStreak >= 25)
                     {
                         break;
                     }

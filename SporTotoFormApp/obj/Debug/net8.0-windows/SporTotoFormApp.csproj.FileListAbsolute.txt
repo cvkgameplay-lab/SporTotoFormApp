@@ -26,3 +26,8 @@ C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\obj\D
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\obj\Debug\net8.0-windows\SporTotoFormApp.genruntimeconfig.cache
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\obj\Debug\net8.0-windows\ref\SporTotoFormApp.dll
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\obj\Debug\net8.0-windows\SporTotoFormApp.sourcelink.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\SporTotoFormApp.exe
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\SporTotoFormApp.deps.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\SporTotoFormApp.runtimeconfig.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\SporTotoFormApp.dll
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\SporTotoFormApp.pdb

@@ -1,6 +1,6 @@
-﻿# SporTotoFormApp Refactor Roadmap
+# SporTotoFormApp Refactor Roadmap
 
-Son guncelleme: 2026-03-19
+Son guncelleme: 2026-03-25
 Durum: Completed
 
 ## Hedef
@@ -34,6 +34,13 @@ Durum: Completed
   - [x] Derleme
   - [x] Temel calisma yolu kontrolu
 
+- [x] Faz 6 - UI Tabanli Parametre Konfigurasyonu
+  - [x] `if (i15 < 10 || i15 > 20)` sabitlerini UI'dan gelen min/max degerlere tasima
+  - [x] `OptimizationOptions` alanlarini UI inputlariyla override edebilme
+  - [x] UI alanlari icin aciklayici info/tooltip metinleri ekleme
+  - [x] Giris dogrulama + normalize kurallarini tek noktada uygulama
+  - [x] Build dogrulamasi ve kullanim notlari
+
 ## Uygulanan Ana Degisiklikler
 1. Prediction uretimi iterator tabanli hale getirildi ve kurallar `PredictionGenerationRules` altinda toplandi.
 2. `HistoricalOutcomeModel` eklendi. `Data/historical_results.txt` dosyasindan pozisyon-bazli olasiliklar otomatik ogreniliyor.
@@ -47,7 +54,7 @@ Durum: Completed
    - Utility bazli final secim + final cesitlilik
 5. `SporTotoClient` retry/backoff, null-safe parse ve daha dayanikli HTML extraction ile guncellendi.
 6. `ExcelExporter` kolonlari utility ve olasilik metrikleriyle genisletildi.
-7. WinForms tarafinda kolon sayisi validasyonu ve daha guvenli calistirma akisı eklendi.
+7. WinForms tarafinda kolon sayisi validasyonu ve daha guvenli calistirma akisi eklendi.
 8. Kullanilmayan Selenium paketleri projeden kaldirildi.
 9. `DataCekRequest` mantigi entegre edildi:
    - Resmi Spor Toto API'sinden gecmis hafta sonuclari cekiliyor
@@ -57,6 +64,11 @@ Durum: Completed
    - Tek tek kupon yerine kupon seti optimize ediliyor
    - Simule edilen senaryolarda 15/14/13 kapsama degeri maksimize ediliyor
    - Final secimde cesitlilik korunuyor
+11. UI tabanli parametrik konfigrasyon eklendi:
+   - i15 min/max API filtre araligi UI'dan okunuyor
+   - `OptimizationOptions` alanlari NumericUpDown kontrollerinden aliniyor
+   - Her alan icin tooltip/info metni eklendi
+   - Servis tarafinda normalize kurallariyla guvenli deger araliklari uygulaniyor
 
 ## Operasyon Notu
 - `SporTotoFormApp/Data/historical_results.txt` dosyasina en az 20 gecerli satir eklersen model daha iyi kalibre olur.
