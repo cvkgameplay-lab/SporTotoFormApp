@@ -17,7 +17,10 @@ namespace SporTotoFormApp.Services
             _options = OptimizationOptions.Create(kolonSayisi, uiOverrides);
         }
 
-        public async Task Run()
+        public async Task<List<Coupon>> Run(
+            bool persistOutputs = true,
+            bool refreshHistoricalData = true,
+            bool manageProgress = true)
         {
             _view.Log("Pipeline baslatildi.", Color.Cyan);
             _view.Log(
@@ -25,20 +28,24 @@ namespace SporTotoFormApp.Services
                 Color.LightSteelBlue);
 
             var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
-            await TryRefreshHistoricalDataAsync(baseDirectory);
+            if (refreshHistoricalData)
+            {
+                await TryRefreshHistoricalDataAsync(baseDirectory);
+            }
 
             var model = HistoricalOutcomeModel.Create(baseDirectory);
             var evaluator = new CouponEvaluationService(model);
             var generator = new PredictionListHelper(PredictionGenerationRules.Default);
 
             _view.Log("Aday kuponlar uretilip on skorlanıyor...", Color.Yellow);
-            var topCandidates = SelectTopCandidates(generator.FiltreliUret(), evaluator.PreScore, _options.InitialTopCandidateLimit);
+            var topCandidates = await Task.Run(() =>
+                SelectTopCandidates(generator.FiltreliUret(), evaluator.PreScore, _options.InitialTopCandidateLimit));
             _view.Log($"On skor sonrasi aday: {topCandidates.Count}", Color.Yellow);
 
-            var diversePrePool = EnforceDiversity(
+            var diversePrePool = await Task.Run(() => EnforceDiversity(
                 topCandidates.Select(x => x.Prediction),
                 _options.MinHammingDistance,
-                _options.DiversePrePoolLimit);
+                _options.DiversePrePoolLimit));
 
             _view.Log($"Cesitlilik sonrasi aday: {diversePrePool.Count}", Color.Yellow);
 
@@ -49,18 +56,21 @@ namespace SporTotoFormApp.Services
                 .ToList();
 
             _view.Log($"API degerlendirme butcesi: {apiCandidates.Count}", Color.Yellow);
-            _view.ProgressBarMaxValue = _options.DesiredCouponCount;
-            _view.ProgressBarValue = 0;
+            if (manageProgress)
+            {
+                _view.ProgressBarMaxValue = _options.DesiredCouponCount;
+                _view.ProgressBarValue = 0;
+            }
 
             var client = new SporTotoClient();
-            var apiFilteredCoupons = await EvaluateCandidatesWithApiAsync(apiCandidates, client, evaluator);
+            var apiFilteredCoupons = await EvaluateCandidatesWithApiAsync(apiCandidates, client, evaluator, manageProgress);
             _view.Log($"API filtresini gecen kupon: {apiFilteredCoupons.Count}", Color.Yellow);
 
-            var selected = SelectFinalCoupons(
+            var selected = await Task.Run(() => SelectFinalCoupons(
                 apiFilteredCoupons,
                 model,
                 _options.DesiredCouponCount,
-                _options.MinHammingDistanceFinal);
+                _options.MinHammingDistanceFinal));
 
             var deduplicated = DeduplicateCoupons(selected);
             if (deduplicated.Count != selected.Count)
@@ -74,12 +84,19 @@ namespace SporTotoFormApp.Services
                 _view.Log($"Uyari: Hedef {_options.DesiredCouponCount} kolon, elde edilen {selected.Count}.", Color.Orange);
             }
 
-            _view.ProgressBarValue = Math.Min(selected.Count, _options.DesiredCouponCount);
-            ExcelExporter.ExportCouponsToExcel(selected, "Kuponlar.xlsx");
-            WriteCouponsToText(selected);
-            PrintMatchSummary(selected);
+            if (manageProgress)
+            {
+                _view.ProgressBarValue = Math.Min(selected.Count, _options.DesiredCouponCount);
+            }
+            if (persistOutputs)
+            {
+                ExcelExporter.ExportCouponsToExcel(selected, "Kuponlar.xlsx");
+                WriteCouponsToText(selected);
+                PrintMatchSummary(selected);
+            }
 
             _view.Log("Pipeline tamamlandi.", Color.LimeGreen);
+            return selected;
         }
 
         private async Task TryRefreshHistoricalDataAsync(string baseDirectory)
@@ -146,12 +163,14 @@ namespace SporTotoFormApp.Services
         private async Task<List<Coupon>> EvaluateCandidatesWithApiAsync(
             List<string> candidates,
             SporTotoClient client,
-            CouponEvaluationService evaluator)
+            CouponEvaluationService evaluator,
+            bool manageProgress)
         {
             var semaphore = new SemaphoreSlim(_options.ApiConcurrency);
             var bag = new ConcurrentBag<Coupon>();
             var acceptedCounter = 0;
             var processedCounter = 0;
+            var errorCounter = 0;
 
             var tasks = candidates.Select(async prediction =>
             {
@@ -197,7 +216,9 @@ namespace SporTotoFormApp.Services
                     bag.Add(coupon);
 
                     var accepted = Interlocked.Increment(ref acceptedCounter);
-                    if (accepted <= _options.DesiredCouponCount)
+                    if (manageProgress &&
+                        accepted <= _options.DesiredCouponCount &&
+                        (accepted == 1 || accepted == _options.DesiredCouponCount || accepted % 5 == 0))
                     {
                         _view.ProgressBarValue = accepted;
                     }
@@ -209,12 +230,16 @@ namespace SporTotoFormApp.Services
                 }
                 catch (Exception ex)
                 {
-                    _view.Log($"API hatasi ({prediction}): {ex.Message}", Color.Crimson);
+                    var errors = Interlocked.Increment(ref errorCounter);
+                    if (errors <= 3 || errors % 50 == 0)
+                    {
+                        _view.Log($"API hatasi sayisi: {errors} | Son hata: {ex.Message}", Color.Crimson);
+                    }
                 }
                 finally
                 {
                     var done = Interlocked.Increment(ref processedCounter);
-                    if (done % 100 == 0)
+                    if (done == 1 || done % 250 == 0 || done == candidates.Count)
                     {
                         _view.Log($"API islenen aday: {done}/{candidates.Count}", Color.DimGray);
                     }
@@ -224,6 +249,11 @@ namespace SporTotoFormApp.Services
             });
 
             await Task.WhenAll(tasks);
+            if (errorCounter > 0)
+            {
+                _view.Log($"Toplam API hatasi: {errorCounter}", Color.OrangeRed);
+            }
+
             return bag.ToList();
         }
 
