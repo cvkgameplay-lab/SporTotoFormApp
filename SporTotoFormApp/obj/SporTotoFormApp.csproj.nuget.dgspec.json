@@ -57,6 +57,10 @@
             "HtmlAgilityPack": {
               "target": "Package",
               "version": "[1.12.4, )"
+            },
+            "Microsoft.Data.SqlClient": {
+              "target": "Package",
+              "version": "[7.0.1, )"
             }
           },
           "imports": [

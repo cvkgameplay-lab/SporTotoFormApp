@@ -1,4 +1,5 @@
 ﻿using SporTotoFormApp.Client;
+using SporTotoFormApp.Data;
 using SporTotoFormApp.Interfaces;
 using SporTotoFormApp.Object;
 using System.Collections.Concurrent;
@@ -28,6 +29,8 @@ namespace SporTotoFormApp.Services
                 Color.LightSteelBlue);
 
             var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            await TrySeedHistoricalDataAsync(baseDirectory);
+
             if (refreshHistoricalData)
             {
                 await TryRefreshHistoricalDataAsync(baseDirectory);
@@ -105,12 +108,18 @@ namespace SporTotoFormApp.Services
             {
                 _view.Log("Gecmis sonuclar resmi API'den cekiliyor...", Color.DeepSkyBlue);
                 var updater = new HistoricalResultsUpdateService();
-                using var refreshTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(35));
+                using var refreshTimeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
                 var refreshResult = await updater.RefreshAsync(baseDirectory, refreshTimeoutCts.Token);
 
                 if (refreshResult.Success)
                 {
-                    _view.Log($"Gecmis veri guncellendi: {refreshResult.LineCount} hafta", Color.DeepSkyBlue);
+                    var payoutInfo = refreshResult.PayoutCount > 0
+                        ? $" | Ikramiye satiri: {refreshResult.PayoutCount}"
+                        : string.Empty;
+                    var matchInfo = refreshResult.MatchCount > 0
+                        ? $" | Mac satiri: {refreshResult.MatchCount}"
+                        : string.Empty;
+                    _view.Log($"Gecmis veri guncellendi: {refreshResult.LineCount} hafta{payoutInfo}{matchInfo}", Color.DeepSkyBlue);
                 }
                 else
                 {
@@ -124,6 +133,22 @@ namespace SporTotoFormApp.Services
             catch (Exception ex)
             {
                 _view.Log($"Gecmis veri guncelleme hatasi: {ex.Message}", Color.OrangeRed);
+            }
+        }
+
+        private async Task TrySeedHistoricalDataAsync(string baseDirectory)
+        {
+            try
+            {
+                var seededCount = await new HistoricalResultRepository().SeedFromFileIfEmptyAsync(baseDirectory);
+                if (seededCount > 0)
+                {
+                    _view.Log($"Yerel gecmis veri DB'ye aktarildi: {seededCount} hafta", Color.DeepSkyBlue);
+                }
+            }
+            catch (Exception ex)
+            {
+                _view.Log($"Yerel gecmis veri DB aktarim hatasi: {ex.Message}", Color.OrangeRed);
             }
         }
 

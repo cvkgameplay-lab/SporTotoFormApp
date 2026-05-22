@@ -1,4 +1,6 @@
-﻿namespace SporTotoFormApp.Services
+using SporTotoFormApp.Data;
+
+namespace SporTotoFormApp.Services
 {
     public sealed class HistoricalOutcomeModel
     {
@@ -23,14 +25,18 @@
         public static HistoricalOutcomeModel Create(string baseDirectory)
         {
             var defaultModel = CreateDefault();
-            var dataPath = FindHistoricalFile(baseDirectory);
+            List<string> lines;
 
-            if (dataPath == null || !File.Exists(dataPath))
+            try
             {
-                return defaultModel;
+                lines = new HistoricalResultRepository().GetAllResultLines();
+            }
+            catch
+            {
+                lines = ReadHistoricalFile(baseDirectory);
             }
 
-            var lines = File.ReadAllLines(dataPath)
+            lines = lines
                 .Select(x => x.Trim().ToUpperInvariant())
                 .Where(x => x.Length == MatchCount && x.All(c => c is '1' or 'X' or '2'))
                 .ToList();
@@ -62,6 +68,21 @@
             }
 
             return new HistoricalOutcomeModel(result);
+        }
+
+        private static List<string> ReadHistoricalFile(string baseDirectory)
+        {
+            var dataPath = FindHistoricalFile(baseDirectory);
+
+            if (dataPath == null || !File.Exists(dataPath))
+            {
+                return new List<string>();
+            }
+
+            return File.ReadAllLines(dataPath)
+                .Select(x => x.Trim().ToUpperInvariant())
+                .Where(x => x.Length == MatchCount && x.All(c => c is '1' or 'X' or '2'))
+                .ToList();
         }
 
         private static string? FindHistoricalFile(string baseDirectory)

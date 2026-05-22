@@ -1,4 +1,5 @@
 using SporTotoFormApp.Interfaces;
+using SporTotoFormApp.Data;
 using SporTotoFormApp.Object;
 using SporTotoFormApp.Services;
 using System.Diagnostics;
@@ -61,6 +62,7 @@ namespace SporTotoFormApp
             {
                 var targetTotal = requests.Sum(x => x.DesiredCouponCount);
                 var combined = new List<Coupon>(targetTotal * 2);
+                var profileNamesByPrediction = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var processed = 0;
                 var refreshHistoricalData = true;
 
@@ -78,6 +80,15 @@ namespace SporTotoFormApp
 
                     refreshHistoricalData = false;
                     combined.AddRange(profileCoupons);
+                    foreach (var coupon in profileCoupons)
+                    {
+                        var normalized = NormalizePrediction(coupon.prediction);
+                        if (!profileNamesByPrediction.ContainsKey(normalized))
+                        {
+                            profileNamesByPrediction[normalized] = request.Name;
+                        }
+                    }
+
                     processed += Math.Min(profileCoupons.Count, request.DesiredCouponCount);
                     ProgressBarValue = processed;
 
@@ -101,7 +112,7 @@ namespace SporTotoFormApp
                     Log($"Uyari: Hedef toplam {targetTotal}, elde edilen {finalCoupons.Count}.", Color.Orange);
                 }
 
-                SaveCombinedOutputs(finalCoupons);
+                await SaveCombinedOutputsAsync(finalCoupons, targetTotal, profileNamesByPrediction);
                 ProgressBarValue = finalCoupons.Count;
                 Log("Tum profiller tamamlandi.", Color.LimeGreen);
             }
@@ -465,11 +476,36 @@ namespace SporTotoFormApp
             return result;
         }
 
-        private void SaveCombinedOutputs(List<Coupon> coupons)
+        private async Task SaveCombinedOutputsAsync(
+            List<Coupon> coupons,
+            int totalRequested,
+            IReadOnlyDictionary<string, string> profileNamesByPrediction)
         {
             ExcelExporter.ExportCouponsToExcel(coupons, "Kuponlar.xlsx");
             WriteCouponsToText(coupons);
+            await SaveCouponsToDatabaseAsync(coupons, totalRequested, profileNamesByPrediction);
             PrintMatchSummary(coupons);
+        }
+
+        private async Task SaveCouponsToDatabaseAsync(
+            List<Coupon> coupons,
+            int totalRequested,
+            IReadOnlyDictionary<string, string> profileNamesByPrediction)
+        {
+            try
+            {
+                var runId = await new PredictionRepository().SaveRunAsync(
+                    coupons,
+                    totalRequested,
+                    "Form1 combined profile run",
+                    profileNamesByPrediction);
+
+                Log($"Kuponlar DB'ye yazildi. RunId: {runId}", Color.Yellow);
+            }
+            catch (Exception ex)
+            {
+                Log($"DB yazim hatasi: {ex.Message}", Color.Crimson);
+            }
         }
 
         private void WriteCouponsToText(List<Coupon> coupons)
