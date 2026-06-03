@@ -15,6 +15,8 @@ namespace SporTotoFormApp.Services
         private const int ModernRoundStart = 1300;
         private const int ModernRoundHardEnd = 1800;
         private const int ModernStopAfterMisses = 30;
+        private const int ExpectedMatchCount = 15;
+        private static readonly TimeSpan PredictionRoundEndGrace = TimeSpan.FromHours(6);
         private readonly HttpClient _httpClient;
 
         public HistoricalResultsUpdateService(HttpClient? httpClient = null)
@@ -30,7 +32,7 @@ namespace SporTotoFormApp.Services
         public async Task<HistoricalRefreshResult> RefreshAsync(string appBaseDirectory, CancellationToken cancellationToken = default)
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(2));
 
             var historicalResults = await DownloadHistoricalResultsAsync(timeoutCts.Token);
             if (historicalResults.Count == 0)
@@ -45,12 +47,76 @@ namespace SporTotoFormApp.Services
             return new HistoricalRefreshResult(true, "SQL Server", savedCount, payoutCount, matchCount);
         }
 
+        public async Task<CurrentRoundInfo?> GetLatestRoundForPredictionAsync(CancellationToken cancellationToken = default)
+        {
+            var candidates = new List<PredictionRoundCandidate>();
+            var foundAny = false;
+            var notFoundStreak = 0;
+
+            for (var roundId = ModernRoundStart; roundId <= ModernRoundHardEnd; roundId++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                var round = await TryGetRoundAsync(roundId, cancellationToken);
+                var current = ConvertRoundToCurrentRound(roundId, round);
+
+                if (current == null)
+                {
+                    if (foundAny)
+                    {
+                        notFoundStreak++;
+                        if (notFoundStreak >= ModernStopAfterMisses)
+                        {
+                            break;
+                        }
+                    }
+
+                    continue;
+                }
+
+                foundAny = true;
+                notFoundStreak = 0;
+
+                if (current.Matches.Count != ExpectedMatchCount ||
+                    IsCompletedRound(round?.Object))
+                {
+                    continue;
+                }
+
+                candidates.Add(new PredictionRoundCandidate(
+                    current,
+                    GetEarliestMatchDate(current),
+                    GetLatestMatchDate(current)));
+            }
+
+            if (candidates.Count == 0)
+            {
+                return null;
+            }
+
+            var now = DateTime.Now;
+            var activeOrUpcoming = candidates
+                .Where(x => x.EndDate == null || x.EndDate.Value >= now.Subtract(PredictionRoundEndGrace))
+                .OrderBy(x => x.StartDate ?? DateTime.MaxValue)
+                .ThenBy(x => x.Round.RoundId)
+                .FirstOrDefault();
+
+            return (activeOrUpcoming ?? candidates
+                    .OrderByDescending(x => x.EndDate ?? DateTime.MinValue)
+                    .ThenByDescending(x => x.Round.RoundId)
+                    .First())
+                .Round;
+        }
+
         private async Task<List<HistoricalResultImport>> DownloadHistoricalResultsAsync(CancellationToken cancellationToken)
         {
             var result = new List<HistoricalResultImport>();
 
-            await DownloadLegacyRangeAsync(result, cancellationToken);
             await DownloadModernRangeAsync(result, cancellationToken);
+            await DownloadLegacyRangeAsync(result, cancellationToken);
 
             return result
                 .DistinctBy(x => x.RoundId ?? 0)
@@ -227,6 +293,51 @@ namespace SporTotoFormApp.Services
                 ConvertRoundToMatches(round.Object));
         }
 
+        private static CurrentRoundInfo? ConvertRoundToCurrentRound(int roundId, RoundResponse? round)
+        {
+            if (round?.Object == null || round.Object.Count == 0)
+            {
+                return null;
+            }
+
+            var matches = new List<CurrentRoundMatch>(round.Object.Count);
+            for (var i = 0; i < round.Object.Count; i++)
+            {
+                var item = round.Object[i];
+                var match = item.Match;
+                var homeTeamName = match?.HomeTeam?.Name;
+                var awayTeamName = match?.AwayTeam?.Name;
+
+                if (match == null ||
+                    string.IsNullOrWhiteSpace(homeTeamName) ||
+                    string.IsNullOrWhiteSpace(awayTeamName))
+                {
+                    continue;
+                }
+
+                matches.Add(new CurrentRoundMatch(
+                    i + 1,
+                    homeTeamName,
+                    awayTeamName,
+                    match.Date,
+                    match.TournamentId,
+                    match.Stage?.Name,
+                    match.Round?.Name));
+            }
+
+            if (matches.Count == 0)
+            {
+                return null;
+            }
+
+            return new CurrentRoundInfo(
+                roundId,
+                round.Metadata.RoundName ?? round.Object.FirstOrDefault()?.GameRoundName ?? $"Round {roundId}",
+                round.Metadata.SeasonYear,
+                round.Metadata.WeekNumber,
+                matches);
+        }
+
         private static IReadOnlyList<HistoricalMatchImport> ConvertRoundToMatches(List<RoundMatchItem>? items)
         {
             if (items == null || items.Count == 0)
@@ -317,12 +428,35 @@ namespace SporTotoFormApp.Services
                 symbols.Add(symbol);
             }
 
-            if (symbols.Count != 15)
+            if (symbols.Count != ExpectedMatchCount)
             {
                 return null;
             }
 
             return new string(symbols.ToArray());
+        }
+
+        private static bool IsCompletedRound(List<RoundMatchItem>? items)
+        {
+            return items != null &&
+                items.Count == ExpectedMatchCount &&
+                items.All(x => x.Match?.FullTimeWin != null || x.Match?.NoterWin != null);
+        }
+
+        private static DateTime? GetEarliestMatchDate(CurrentRoundInfo round)
+        {
+            return round.Matches
+                .Select(x => x.MatchDate)
+                .Where(x => x != null)
+                .Min();
+        }
+
+        private static DateTime? GetLatestMatchDate(CurrentRoundInfo round)
+        {
+            return round.Matches
+                .Select(x => x.MatchDate)
+                .Where(x => x != null)
+                .Max();
         }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -790,4 +924,25 @@ namespace SporTotoFormApp.Services
     }
 
     public sealed record HistoricalRefreshResult(bool Success, string Target, int LineCount, int PayoutCount, int MatchCount);
+
+    public sealed record CurrentRoundInfo(
+        int RoundId,
+        string RoundName,
+        int? SeasonYear,
+        int? WeekNumber,
+        IReadOnlyList<CurrentRoundMatch> Matches);
+
+    public sealed record CurrentRoundMatch(
+        int MatchOrder,
+        string HomeTeamName,
+        string AwayTeamName,
+        DateTime? MatchDate,
+        int? TournamentId,
+        string? StageName,
+        string? LeagueRoundName);
+
+    internal sealed record PredictionRoundCandidate(
+        CurrentRoundInfo Round,
+        DateTime? StartDate,
+        DateTime? EndDate);
 }

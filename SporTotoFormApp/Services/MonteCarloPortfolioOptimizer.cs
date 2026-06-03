@@ -22,6 +22,10 @@ namespace SporTotoFormApp.Services
                 return new List<Coupon>();
             }
 
+            var maxSameSymbolPerMatch = desiredCount >= 10
+                ? Math.Max(desiredCount - 2, 1)
+                : desiredCount;
+            var minimumAlternativeCoverage = desiredCount >= 10 ? 2 : 0;
             var outcomes = SimulateOutcomes();
             var scenarioScores = BuildScenarioScores(candidates, outcomes);
 
@@ -29,6 +33,7 @@ namespace SporTotoFormApp.Services
             var selected = new List<Coupon>(desiredCount);
             var currentBest = new double[_scenarioCount];
             var used = new bool[candidates.Count];
+            var symbolCountsByMatch = CreateSymbolCounts();
 
             for (var slot = 0; slot < desiredCount; slot++)
             {
@@ -47,6 +52,11 @@ namespace SporTotoFormApp.Services
                         continue;
                     }
 
+                    if (ExceedsPerMatchSymbolCap(candidates[i].prediction, symbolCountsByMatch, maxSameSymbolPerMatch))
+                    {
+                        continue;
+                    }
+
                     var gain = 0.0;
                     var candidateScores = scenarioScores[i];
 
@@ -57,6 +67,7 @@ namespace SporTotoFormApp.Services
                     }
 
                     gain += candidates[i].Utility * 0.02;
+                    gain += CoverageBonus(candidates[i].prediction, symbolCountsByMatch, selected.Count, desiredCount, minimumAlternativeCoverage);
 
                     if (gain > bestGain)
                     {
@@ -73,6 +84,7 @@ namespace SporTotoFormApp.Services
                 used[bestIndex] = true;
                 selectedIndices.Add(bestIndex);
                 selected.Add(candidates[bestIndex]);
+                AddToSymbolCounts(candidates[bestIndex].prediction, symbolCountsByMatch);
 
                 var chosenScores = scenarioScores[bestIndex];
                 for (var s = 0; s < _scenarioCount; s++)
@@ -82,6 +94,84 @@ namespace SporTotoFormApp.Services
             }
 
             return selected;
+        }
+
+        private static Dictionary<char, int>[] CreateSymbolCounts()
+        {
+            var result = new Dictionary<char, int>[15];
+            for (var i = 0; i < result.Length; i++)
+            {
+                result[i] = new Dictionary<char, int>
+                {
+                    ['1'] = 0,
+                    ['X'] = 0,
+                    ['2'] = 0
+                };
+            }
+
+            return result;
+        }
+
+        private static bool ExceedsPerMatchSymbolCap(
+            string prediction,
+            Dictionary<char, int>[] symbolCountsByMatch,
+            int maxSameSymbolPerMatch)
+        {
+            for (var i = 0; i < prediction.Length; i++)
+            {
+                if (symbolCountsByMatch[i][prediction[i]] >= maxSameSymbolPerMatch)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static double CoverageBonus(
+            string prediction,
+            Dictionary<char, int>[] symbolCountsByMatch,
+            int selectedCount,
+            int desiredCount,
+            int minimumAlternativeCoverage)
+        {
+            if (minimumAlternativeCoverage <= 0)
+            {
+                return 0.0;
+            }
+
+            var remainingAfterThis = desiredCount - selectedCount - 1;
+            var bonus = 0.0;
+
+            for (var i = 0; i < prediction.Length; i++)
+            {
+                var counts = symbolCountsByMatch[i];
+                var chosen = prediction[i];
+                var projectedChosenCount = counts[chosen] + 1;
+                var projectedMax = Math.Max(projectedChosenCount, counts.Where(x => x.Key != chosen).Max(x => x.Value));
+                var projectedAlternativeTotal = selectedCount + 1 - projectedMax;
+
+                if (projectedAlternativeTotal < minimumAlternativeCoverage)
+                {
+                    bonus += 0.002 * (minimumAlternativeCoverage - projectedAlternativeTotal);
+                }
+
+                if (remainingAfterThis <= minimumAlternativeCoverage &&
+                    counts[chosen] == selectedCount)
+                {
+                    bonus -= 0.01;
+                }
+            }
+
+            return bonus;
+        }
+
+        private static void AddToSymbolCounts(string prediction, Dictionary<char, int>[] symbolCountsByMatch)
+        {
+            for (var i = 0; i < prediction.Length; i++)
+            {
+                symbolCountsByMatch[i][prediction[i]]++;
+            }
         }
 
         private List<char[]> SimulateOutcomes()

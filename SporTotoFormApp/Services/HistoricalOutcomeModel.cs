@@ -22,7 +22,9 @@ namespace SporTotoFormApp.Services
             return SymbolProbabilities.Default;
         }
 
-        public static HistoricalOutcomeModel Create(string baseDirectory)
+        public static HistoricalOutcomeModel Create(
+            string baseDirectory,
+            IReadOnlyList<SymbolProbabilities>? currentRoundProbabilities = null)
         {
             var defaultModel = CreateDefault();
             List<string> lines;
@@ -65,6 +67,14 @@ namespace SporTotoFormApp.Services
                 }
 
                 result[i] = SymbolProbabilities.FromCounts(count1, countX, count2);
+            }
+
+            if (currentRoundProbabilities is { Count: >= MatchCount })
+            {
+                for (var i = 0; i < MatchCount; i++)
+                {
+                    result[i] = SymbolProbabilities.Blend(result[i], currentRoundProbabilities[i], 0.62);
+                }
             }
 
             return new HistoricalOutcomeModel(result);
@@ -150,6 +160,15 @@ namespace SporTotoFormApp.Services
             }
 
             return new SymbolProbabilities(one / sum, draw / sum, two / sum);
+        }
+
+        public static SymbolProbabilities Blend(SymbolProbabilities baseValue, SymbolProbabilities overlay, double overlayWeight)
+        {
+            var w = Math.Clamp(overlayWeight, 0.0, 1.0);
+            return Normalize(
+                baseValue.One * (1.0 - w) + overlay.One * w,
+                baseValue.Draw * (1.0 - w) + overlay.Draw * w,
+                baseValue.Two * (1.0 - w) + overlay.Two * w);
         }
 
         public double ForSymbol(char symbol)

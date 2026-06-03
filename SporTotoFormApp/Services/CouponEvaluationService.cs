@@ -18,12 +18,19 @@ namespace SporTotoFormApp.Services
             var cX = 0;
             var c2 = 0;
             var transitions = 0;
+            var expected1 = 0.0;
+            var expectedX = 0.0;
+            var expected2 = 0.0;
 
             for (var i = 0; i < prediction.Length; i++)
             {
                 var symbol = prediction[i];
-                var probability = Math.Max(_model.GetForPosition(i).ForSymbol(symbol), 1e-6);
+                var p = _model.GetForPosition(i);
+                var probability = Math.Max(p.ForSymbol(symbol), 1e-6);
                 logLikelihood += Math.Log(probability);
+                expected1 += p.One;
+                expectedX += p.Draw;
+                expected2 += p.Two;
 
                 switch (symbol)
                 {
@@ -40,9 +47,9 @@ namespace SporTotoFormApp.Services
 
             // Keep a slight rarity preference, but avoid ultra-random picks.
             var structurePenalty = 0.0;
-            structurePenalty += Math.Pow(c1 - 7.0, 2) * 0.08;
-            structurePenalty += Math.Pow(cX - 4.0, 2) * 0.07;
-            structurePenalty += Math.Pow(c2 - 4.0, 2) * 0.07;
+            structurePenalty += Math.Pow(c1 - expected1, 2) * 0.08;
+            structurePenalty += Math.Pow(cX - expectedX, 2) * 0.07;
+            structurePenalty += Math.Pow(c2 - expected2, 2) * 0.07;
             structurePenalty += transitions < 6 ? (6 - transitions) * 0.20 : 0.0;
             structurePenalty += transitions > 13 ? (transitions - 13) * 0.15 : 0.0;
 

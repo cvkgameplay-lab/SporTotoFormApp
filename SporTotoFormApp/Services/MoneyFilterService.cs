@@ -11,11 +11,17 @@ namespace SporTotoFormApp.Services
     {
         private readonly ITestView _view;
         private readonly OptimizationOptions _options;
+        private readonly IReadOnlyList<SymbolProbabilities>? _currentRoundProbabilities;
 
-        public MoneyFilterService(ITestView view, int kolonSayisi, OptimizationOptions? uiOverrides = null)
+        public MoneyFilterService(
+            ITestView view,
+            int kolonSayisi,
+            OptimizationOptions? uiOverrides = null,
+            IReadOnlyList<SymbolProbabilities>? currentRoundProbabilities = null)
         {
             _view = view;
             _options = OptimizationOptions.Create(kolonSayisi, uiOverrides);
+            _currentRoundProbabilities = currentRoundProbabilities;
         }
 
         public async Task<List<Coupon>> Run(
@@ -36,7 +42,7 @@ namespace SporTotoFormApp.Services
                 await TryRefreshHistoricalDataAsync(baseDirectory);
             }
 
-            var model = HistoricalOutcomeModel.Create(baseDirectory);
+            var model = HistoricalOutcomeModel.Create(baseDirectory, _currentRoundProbabilities);
             var evaluator = new CouponEvaluationService(model);
             var generator = new PredictionListHelper(PredictionGenerationRules.Default);
 
