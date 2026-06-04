@@ -7,10 +7,21 @@ namespace SporTotoFormApp.Services
         private const int MatchCount = 15;
         private readonly Dictionary<int, SymbolProbabilities> _positionProbabilities;
 
-        private HistoricalOutcomeModel(Dictionary<int, SymbolProbabilities> positionProbabilities)
+        private HistoricalOutcomeModel(
+            Dictionary<int, SymbolProbabilities> positionProbabilities,
+            string source,
+            int sampleSize,
+            bool usedCurrentRoundBlend)
         {
             _positionProbabilities = positionProbabilities;
+            Source = source;
+            SampleSize = sampleSize;
+            UsedCurrentRoundBlend = usedCurrentRoundBlend;
         }
+
+        public string Source { get; }
+        public int SampleSize { get; }
+        public bool UsedCurrentRoundBlend { get; }
 
         public SymbolProbabilities GetForPosition(int index)
         {
@@ -28,6 +39,7 @@ namespace SporTotoFormApp.Services
         {
             var defaultModel = CreateDefault();
             List<string> lines;
+            var source = "SQL Server";
 
             try
             {
@@ -35,6 +47,7 @@ namespace SporTotoFormApp.Services
             }
             catch
             {
+                source = "historical_results.txt";
                 lines = ReadHistoricalFile(baseDirectory);
             }
 
@@ -69,15 +82,18 @@ namespace SporTotoFormApp.Services
                 result[i] = SymbolProbabilities.FromCounts(count1, countX, count2);
             }
 
+            var usedCurrentRoundBlend = false;
             if (currentRoundProbabilities is { Count: >= MatchCount })
             {
                 for (var i = 0; i < MatchCount; i++)
                 {
                     result[i] = SymbolProbabilities.Blend(result[i], currentRoundProbabilities[i], 0.62);
                 }
+
+                usedCurrentRoundBlend = true;
             }
 
-            return new HistoricalOutcomeModel(result);
+            return new HistoricalOutcomeModel(result, source, lines.Count, usedCurrentRoundBlend);
         }
 
         private static List<string> ReadHistoricalFile(string baseDirectory)
@@ -127,7 +143,7 @@ namespace SporTotoFormApp.Services
                 map[i] = SymbolProbabilities.Normalize(p1, pX, p2);
             }
 
-            return new HistoricalOutcomeModel(map);
+            return new HistoricalOutcomeModel(map, "Varsayilan model", 0, false);
         }
     }
 

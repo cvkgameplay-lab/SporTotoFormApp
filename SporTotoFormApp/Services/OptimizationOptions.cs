@@ -3,13 +3,13 @@ namespace SporTotoFormApp.Services
     public sealed class OptimizationOptions
     {
         public int DesiredCouponCount { get; init; }
-        public int InitialTopCandidateLimit { get; init; } = 500000;
-        public int DiversePrePoolLimit { get; init; } = 120000;
-        public int ApiBudgetMultiplier { get; init; } = 120;
+        public int InitialTopCandidateLimit { get; init; } = 3000000;
+        public int DiversePrePoolLimit { get; init; } = 900000;
+        public int ApiBudgetMultiplier { get; init; } = 3000;
         public int ApiConcurrency { get; init; } = 6;
         public int MinHammingDistance { get; init; } = 5;
         public int MinHammingDistanceFinal { get; init; } = 4;
-        public int MonteCarloScenarioCount { get; init; } = 15000;
+        public int MonteCarloScenarioCount { get; init; } = 300000;
         public int MinI15WinnerCount { get; init; } = 10;
         public int MaxI15WinnerCount { get; init; } = 20;
 

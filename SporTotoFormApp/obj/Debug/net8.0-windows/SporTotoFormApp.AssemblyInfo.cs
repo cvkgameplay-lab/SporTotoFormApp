@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SporTotoFormApp")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+294a9e6da2597cabf6741a4bdbfe7b413055316b")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8e91b82dc7ab4e61a1db9cc7e47e30a29cc93a60")]
 [assembly: System.Reflection.AssemblyProductAttribute("SporTotoFormApp")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SporTotoFormApp")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -72,3 +72,8 @@ C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\bin\D
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\bin\Debug\net8.0-windows\runtimes\win-x86\native\Microsoft.Data.SqlClient.SNI.dll
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\bin\Debug\net8.0-windows\runtimes\win\lib\net8.0\System.Diagnostics.EventLog.dll
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\SporTotoFormApp\bin\Debug\net8.0-windows\runtimes\win\lib\net8.0\System.Security.Cryptography.Pkcs.dll
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\duration_preset\SporTotoFormApp.exe
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\duration_preset\SporTotoFormApp.deps.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\duration_preset\SporTotoFormApp.runtimeconfig.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\duration_preset\SporTotoFormApp.dll
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_check\duration_preset\SporTotoFormApp.pdb

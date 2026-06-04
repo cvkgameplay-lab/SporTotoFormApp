@@ -3,6 +3,7 @@ using SporTotoFormApp.Data;
 using SporTotoFormApp.Interfaces;
 using SporTotoFormApp.Object;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace SporTotoFormApp.Services
@@ -43,43 +44,59 @@ namespace SporTotoFormApp.Services
             }
 
             var model = HistoricalOutcomeModel.Create(baseDirectory, _currentRoundProbabilities);
+            _view.Log(
+                $"Model kaynagi: {model.Source} | Gecmis sonuc satiri: {model.SampleSize} | Mac bazli DB/Nesine harmani: {(model.UsedCurrentRoundBlend ? "var" : "yok")}",
+                model.SampleSize >= 20 ? Color.LightSteelBlue : Color.Orange);
             var evaluator = new CouponEvaluationService(model);
             var generator = new PredictionListHelper(PredictionGenerationRules.Default);
 
-            _view.Log("Aday kuponlar uretilip on skorlanıyor...", Color.Yellow);
-            var topCandidates = await Task.Run(() =>
+            var pipelineWatch = Stopwatch.StartNew();
+            _view.Log("Aday kuponlar uretilip on skorlaniyor...", Color.Yellow);
+            var topCandidateSelection = await Task.Run(() =>
                 SelectTopCandidates(generator.FiltreliUret(), evaluator.PreScore, _options.InitialTopCandidateLimit));
-            _view.Log($"On skor sonrasi aday: {topCandidates.Count}", Color.Yellow);
+            var topCandidates = topCandidateSelection.Candidates;
+            _view.Log(
+                $"Aday tarama tamamlandi: {topCandidateSelection.ScannedCount:n0} kombinasyon | TopK: {topCandidates.Count:n0} | Sure: {topCandidateSelection.Elapsed.TotalSeconds:F1} sn",
+                Color.Yellow);
 
+            var diversityWatch = Stopwatch.StartNew();
             var diversePrePool = await Task.Run(() => EnforceDiversity(
                 topCandidates.Select(x => x.Prediction),
                 _options.MinHammingDistance,
                 _options.DiversePrePoolLimit));
+            diversityWatch.Stop();
 
-            _view.Log($"Cesitlilik sonrasi aday: {diversePrePool.Count}", Color.Yellow);
+            _view.Log($"Cesitlilik sonrasi aday: {diversePrePool.Count:n0} | Sure: {diversityWatch.Elapsed.TotalSeconds:F1} sn", Color.Yellow);
 
-            var apiBudget = Math.Min(diversePrePool.Count, _options.GetApiBudget());
-            var apiCandidates = diversePrePool
-                .Take(apiBudget)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            var apiBudget = Math.Min(topCandidates.Count, _options.GetApiBudget());
+            var apiCandidates = BuildApiCandidateList(
+                diversePrePool,
+                topCandidates.Select(x => x.Prediction),
+                apiBudget);
 
-            _view.Log($"API degerlendirme butcesi: {apiCandidates.Count}", Color.Yellow);
+            _view.Log(
+                $"API degerlendirme butcesi: {apiCandidates.Count:n0}/{apiBudget:n0} | Cesit havuz katkisi: {Math.Min(diversePrePool.Count, apiCandidates.Count):n0}",
+                apiCandidates.Count >= apiBudget ? Color.Yellow : Color.Orange);
             if (manageProgress)
             {
                 _view.ProgressBarMaxValue = _options.DesiredCouponCount;
                 _view.ProgressBarValue = 0;
             }
 
+            var apiWatch = Stopwatch.StartNew();
             var client = new SporTotoClient();
             var apiFilteredCoupons = await EvaluateCandidatesWithApiAsync(apiCandidates, client, evaluator, manageProgress);
-            _view.Log($"API filtresini gecen kupon: {apiFilteredCoupons.Count}", Color.Yellow);
+            apiWatch.Stop();
+            _view.Log($"API filtresini gecen kupon: {apiFilteredCoupons.Count:n0} | Sure: {apiWatch.Elapsed.TotalSeconds:F1} sn", Color.Yellow);
 
+            var monteCarloWatch = Stopwatch.StartNew();
             var selected = await Task.Run(() => SelectFinalCoupons(
                 apiFilteredCoupons,
                 model,
                 _options.DesiredCouponCount,
                 _options.MinHammingDistanceFinal));
+            monteCarloWatch.Stop();
+            _view.Log($"Monte Carlo/final secim suresi: {monteCarloWatch.Elapsed.TotalSeconds:F1} sn", Color.DeepSkyBlue);
 
             var deduplicated = DeduplicateCoupons(selected);
             if (deduplicated.Count != selected.Count)
@@ -105,6 +122,8 @@ namespace SporTotoFormApp.Services
             }
 
             _view.Log("Pipeline tamamlandi.", Color.LimeGreen);
+            pipelineWatch.Stop();
+            _view.Log($"Toplam profil suresi: {pipelineWatch.Elapsed.TotalSeconds:F1} sn", Color.LightSteelBlue);
             return selected;
         }
 
@@ -158,8 +177,9 @@ namespace SporTotoFormApp.Services
             }
         }
 
-        private List<ScoredCandidate> SelectTopCandidates(IEnumerable<string> candidates, Func<string, double> preScorer, int limit)
+        private TopCandidateSelection SelectTopCandidates(IEnumerable<string> candidates, Func<string, double> preScorer, int limit)
         {
+            var watch = Stopwatch.StartNew();
             var queue = new PriorityQueue<ScoredCandidate, double>();
             var total = 0;
 
@@ -185,10 +205,14 @@ namespace SporTotoFormApp.Services
                 }
             }
 
-            return queue.UnorderedItems
+            watch.Stop();
+
+            var selected = queue.UnorderedItems
                 .Select(x => x.Element)
                 .OrderByDescending(x => x.Score)
                 .ToList();
+
+            return new TopCandidateSelection(selected, total, watch.Elapsed);
         }
 
         private async Task<List<Coupon>> EvaluateCandidatesWithApiAsync(
@@ -202,88 +226,108 @@ namespace SporTotoFormApp.Services
             var acceptedCounter = 0;
             var processedCounter = 0;
             var errorCounter = 0;
+            var emptyResponseCounter = 0;
+            var i15RejectedCounter = 0;
+            var progressLogInterval = Math.Max(250, candidates.Count / 1000);
 
-            var tasks = candidates.Select(async prediction =>
+            var nextIndex = -1;
+            var workers = Enumerable.Range(0, _options.ApiConcurrency).Select(async _ =>
             {
-                await semaphore.WaitAsync();
-
-                try
+                while (true)
                 {
-                    var result = await client.SubmitPredictionStringAsync(prediction.ToLowerInvariant());
-                    if (result.Count == 0)
+                    var index = Interlocked.Increment(ref nextIndex);
+                    if (index >= candidates.Count)
                     {
-                        return;
+                        break;
                     }
 
-                    var i15 = GetKisiSayisi(result, "15");
-                    var i14 = GetKisiSayisi(result, "14");
-                    var i13 = GetKisiSayisi(result, "13");
-                    var i12 = GetKisiSayisi(result, "12");
+                    var prediction = candidates[index];
+                    await semaphore.WaitAsync();
 
-                    if (i15 < _options.MinI15WinnerCount || i15 > _options.MaxI15WinnerCount)
+                    try
                     {
-                        return;
+                        var result = await client.SubmitPredictionStringAsync(prediction.ToLowerInvariant());
+                        if (result.Count == 0)
+                        {
+                            Interlocked.Increment(ref emptyResponseCounter);
+                            continue;
+                        }
+
+                        var i15 = GetKisiSayisi(result, "15");
+                        var i14 = GetKisiSayisi(result, "14");
+                        var i13 = GetKisiSayisi(result, "13");
+                        var i12 = GetKisiSayisi(result, "12");
+
+                        if (i15 < _options.MinI15WinnerCount || i15 > _options.MaxI15WinnerCount)
+                        {
+                            Interlocked.Increment(ref i15RejectedCounter);
+                            continue;
+                        }
+
+                        var bonus = new Bonus
+                        {
+                            i15 = i15.ToString(CultureInfo.InvariantCulture),
+                            i14 = i14.ToString(CultureInfo.InvariantCulture),
+                            i13 = i13.ToString(CultureInfo.InvariantCulture),
+                            i12 = i12.ToString(CultureInfo.InvariantCulture)
+                        };
+
+                        var analysis = evaluator.Analyze(prediction, bonus);
+                        var coupon = new Coupon
+                        {
+                            prediction = prediction,
+                            bonus = bonus,
+                            Utility = analysis.Utility,
+                            P15Probability = analysis.P15,
+                            P14Probability = analysis.P14,
+                            P13Probability = analysis.P13
+                        };
+
+                        bag.Add(coupon);
+
+                        var accepted = Interlocked.Increment(ref acceptedCounter);
+                        if (manageProgress &&
+                            accepted <= _options.DesiredCouponCount &&
+                            (accepted == 1 || accepted == _options.DesiredCouponCount || accepted % 5 == 0))
+                        {
+                            _view.ProgressBarValue = accepted;
+                        }
+
+                        if (accepted % 25 == 0)
+                        {
+                            _view.Log($"API filtresini gecen kupon: {accepted}", Color.Green);
+                        }
                     }
-
-                    var bonus = new Bonus
+                    catch (Exception ex)
                     {
-                        i15 = i15.ToString(CultureInfo.InvariantCulture),
-                        i14 = i14.ToString(CultureInfo.InvariantCulture),
-                        i13 = i13.ToString(CultureInfo.InvariantCulture),
-                        i12 = i12.ToString(CultureInfo.InvariantCulture)
-                    };
-
-                    var analysis = evaluator.Analyze(prediction, bonus);
-                    var coupon = new Coupon
-                    {
-                        prediction = prediction,
-                        bonus = bonus,
-                        Utility = analysis.Utility,
-                        P15Probability = analysis.P15,
-                        P14Probability = analysis.P14,
-                        P13Probability = analysis.P13
-                    };
-
-                    bag.Add(coupon);
-
-                    var accepted = Interlocked.Increment(ref acceptedCounter);
-                    if (manageProgress &&
-                        accepted <= _options.DesiredCouponCount &&
-                        (accepted == 1 || accepted == _options.DesiredCouponCount || accepted % 5 == 0))
-                    {
-                        _view.ProgressBarValue = accepted;
+                        var errors = Interlocked.Increment(ref errorCounter);
+                        if (errors <= 3 || errors % 50 == 0)
+                        {
+                            _view.Log($"API hatasi sayisi: {errors} | Son hata: {ex.Message}", Color.Crimson);
+                        }
                     }
+                    finally
+                    {
+                        var done = Interlocked.Increment(ref processedCounter);
+                        if (done == 1 || done % progressLogInterval == 0 || done == candidates.Count)
+                        {
+                            _view.Log($"API islenen aday: {done}/{candidates.Count}", Color.DimGray);
+                        }
 
-                    if (accepted % 25 == 0)
-                    {
-                        _view.Log($"API filtresini gecen kupon: {accepted}", Color.Green);
+                        semaphore.Release();
                     }
-                }
-                catch (Exception ex)
-                {
-                    var errors = Interlocked.Increment(ref errorCounter);
-                    if (errors <= 3 || errors % 50 == 0)
-                    {
-                        _view.Log($"API hatasi sayisi: {errors} | Son hata: {ex.Message}", Color.Crimson);
-                    }
-                }
-                finally
-                {
-                    var done = Interlocked.Increment(ref processedCounter);
-                    if (done == 1 || done % 250 == 0 || done == candidates.Count)
-                    {
-                        _view.Log($"API islenen aday: {done}/{candidates.Count}", Color.DimGray);
-                    }
-
-                    semaphore.Release();
                 }
             });
 
-            await Task.WhenAll(tasks);
+            await Task.WhenAll(workers);
             if (errorCounter > 0)
             {
                 _view.Log($"Toplam API hatasi: {errorCounter}", Color.OrangeRed);
             }
+
+            _view.Log(
+                $"API ozet | Bos cevap: {emptyResponseCounter:n0} | i15 disi elenen: {i15RejectedCounter:n0} | Kabul: {acceptedCounter:n0}",
+                Color.LightSteelBlue);
 
             return bag.ToList();
         }
@@ -294,10 +338,11 @@ namespace SporTotoFormApp.Services
             int desiredCount,
             int minDistance)
         {
+            var monteCarloCandidateLimit = Math.Clamp(desiredCount * 50, 1000, 3000);
             var ordered = candidates
                 .OrderByDescending(x => x.Utility)
                 .ThenBy(x => ParseDouble(x.bonus.i15))
-                .Take(Math.Max(desiredCount * 8, 120))
+                .Take(monteCarloCandidateLimit)
                 .ToList();
 
             if (ordered.Count == 0)
@@ -305,7 +350,9 @@ namespace SporTotoFormApp.Services
                 return new List<Coupon>();
             }
 
-            _view.Log($"Monte Carlo portfoy optimizasyonu basladi ({_options.MonteCarloScenarioCount} senaryo)", Color.DeepSkyBlue);
+            _view.Log(
+                $"Monte Carlo portfoy optimizasyonu basladi | Aday: {ordered.Count:n0} | Senaryo: {_options.MonteCarloScenarioCount:n0}",
+                Color.DeepSkyBlue);
             var optimizer = new MonteCarloPortfolioOptimizer(model, _options.MonteCarloScenarioCount);
             var selected = optimizer.SelectPortfolio(ordered, desiredCount, minDistance);
 
@@ -336,6 +383,45 @@ namespace SporTotoFormApp.Services
             }
 
             return selected;
+        }
+
+        private static List<string> BuildApiCandidateList(
+            IReadOnlyList<string> diversePrePool,
+            IEnumerable<string> rankedCandidates,
+            int targetCount)
+        {
+            var result = new List<string>(targetCount);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var candidate in diversePrePool)
+            {
+                if (!seen.Add(candidate))
+                {
+                    continue;
+                }
+
+                result.Add(candidate);
+                if (result.Count >= targetCount)
+                {
+                    return result;
+                }
+            }
+
+            foreach (var candidate in rankedCandidates)
+            {
+                if (!seen.Add(candidate))
+                {
+                    continue;
+                }
+
+                result.Add(candidate);
+                if (result.Count >= targetCount)
+                {
+                    break;
+                }
+            }
+
+            return result;
         }
 
         private static int Distance(string left, string right)
@@ -481,5 +567,6 @@ namespace SporTotoFormApp.Services
         }
 
         private sealed record ScoredCandidate(string Prediction, double Score);
+        private sealed record TopCandidateSelection(List<ScoredCandidate> Candidates, int ScannedCount, TimeSpan Elapsed);
     }
 }

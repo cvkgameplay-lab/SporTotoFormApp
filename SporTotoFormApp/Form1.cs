@@ -21,6 +21,12 @@ namespace SporTotoFormApp
         private NesineProgram? _nesineProgram;
         private IReadOnlyDictionary<int, NesineHeadToHeadSummary>? _nesineHeadToHeadByMatchNo;
         private IReadOnlyDictionary<int, MatchModelFeature>? _matchModelFeaturesByMatchNo;
+        private static readonly RunDurationPreset[] DurationPresets =
+        [
+            new("1 saat", 3000000, 900000, 3000, 6, 4, 4, 300000),
+            new("4 saat", 5000000, 1500000, 12000, 6, 4, 4, 700000),
+            new("8 saat", 5000000, 3000000, 24000, 6, 4, 4, 1000000)
+        ];
 
         public int ProgressBarValue
         {
@@ -74,10 +80,20 @@ namespace SporTotoFormApp
                 var combined = new List<Coupon>(targetTotal * 2);
                 var profileNamesByPrediction = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var processed = 0;
-                var refreshHistoricalData = true;
 
                 ProgressBarMaxValue = targetTotal;
                 ProgressBarValue = 0;
+
+                var historicalRefreshSucceeded = await RefreshHistoricalResultsAndEvaluateRunsAsync();
+                if (historicalRefreshSucceeded && _currentRound != null)
+                {
+                    _predictionInsight = TryBuildPredictionInsight(
+                        _currentRound,
+                        _nesineProgram,
+                        _nesineHeadToHeadByMatchNo,
+                        _matchModelFeaturesByMatchNo);
+                    Log("Guncel gecmis veri ile DB tahmin modeli yeniden hesaplandi.", Color.LightSteelBlue);
+                }
 
                 if (_predictionInsight?.Payout.SampleSize > 0)
                 {
@@ -96,10 +112,10 @@ namespace SporTotoFormApp
                         _predictionInsight?.MatchProbabilities);
                     var profileCoupons = await service.Run(
                         persistOutputs: false,
-                        refreshHistoricalData: refreshHistoricalData,
+                        refreshHistoricalData: !historicalRefreshSucceeded,
                         manageProgress: false);
 
-                    refreshHistoricalData = false;
+                    historicalRefreshSucceeded = true;
                     combined.AddRange(profileCoupons);
                     foreach (var coupon in profileCoupons)
                     {
@@ -194,29 +210,58 @@ namespace SporTotoFormApp
             _evaluateResultsButton.Enabled = false;
             try
             {
-                Log("Gecmis sonuclar resmi API'den guncelleniyor...", Color.DeepSkyBlue);
-                using (var refreshTimeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(3)))
-                {
-                    var refreshResult = await new HistoricalResultsUpdateService()
-                        .RefreshAsync(AppDomain.CurrentDomain.BaseDirectory, refreshTimeoutCts.Token);
-                    if (refreshResult.Success)
-                    {
-                        Log(
-                            $"Gecmis veri guncellendi: {refreshResult.LineCount} hafta | Mac satiri: {refreshResult.MatchCount}",
-                            Color.DeepSkyBlue);
-                    }
-                    else
-                    {
-                        Log("Gecmis veri guncellenemedi, mevcut DB ile degerlendirme deneniyor.", Color.Orange);
-                    }
-                }
+                await RefreshHistoricalResultsAndEvaluateRunsAsync();
+            }
+            catch (Exception ex)
+            {
+                Log($"Run sonuc degerlendirme hatasi: {ex.Message}", Color.OrangeRed);
+            }
+            finally
+            {
+                _evaluateResultsButton.Enabled = true;
+            }
+        }
 
+        private async Task<bool> RefreshHistoricalResultsAndEvaluateRunsAsync()
+        {
+            var historicalRefreshSucceeded = false;
+
+            try
+            {
+                Log("Gecmis sonuclar resmi API'den guncelleniyor...", Color.DeepSkyBlue);
+                using var refreshTimeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                var refreshResult = await new HistoricalResultsUpdateService()
+                    .RefreshAsync(AppDomain.CurrentDomain.BaseDirectory, refreshTimeoutCts.Token);
+                historicalRefreshSucceeded = refreshResult.Success;
+
+                if (refreshResult.Success)
+                {
+                    Log(
+                        $"Gecmis veri guncellendi: {refreshResult.LineCount} hafta | Ikramiye satiri: {refreshResult.PayoutCount} | Mac satiri: {refreshResult.MatchCount}",
+                        Color.DeepSkyBlue);
+                }
+                else
+                {
+                    Log("Gecmis veri guncellenemedi, mevcut DB ile devam ediliyor.", Color.Orange);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Gecmis veri guncelleme zaman asimina ugradi, mevcut DB ile devam ediliyor.", Color.Orange);
+            }
+            catch (Exception ex)
+            {
+                Log($"Gecmis veri guncelleme hatasi: {ex.Message}", Color.OrangeRed);
+            }
+
+            try
+            {
                 Log("Sonucu gelmis tahmin run'lari degerlendiriliyor...", Color.LightSteelBlue);
                 var summaries = await new PredictionRepository().EvaluatePendingRunsAsync();
                 if (summaries.Count == 0)
                 {
                     Log("Degerlendirilecek tamamlanmis run bulunamadi.", Color.LightSteelBlue);
-                    return;
+                    return historicalRefreshSucceeded;
                 }
 
                 foreach (var summary in summaries)
@@ -232,10 +277,8 @@ namespace SporTotoFormApp
             {
                 Log($"Run sonuc degerlendirme hatasi: {ex.Message}", Color.OrangeRed);
             }
-            finally
-            {
-                _evaluateResultsButton.Enabled = true;
-            }
+
+            return historicalRefreshSucceeded;
         }
 
         private async Task LoadCurrentRoundMatchesAsync()
@@ -702,7 +745,7 @@ namespace SporTotoFormApp
             };
 
             _profiles.Clear();
-            _profiles.Add(CreateProfileTab("DB Model", 30, 1, 20, 700000, 170000, 150, 6, 4, 4, 30000));
+            _profiles.Add(CreateProfileTab("DB Model", 30, 1, 20, DurationPresets[0]));
 
             Controls.Add(_profileTabs);
         }
@@ -712,13 +755,7 @@ namespace SporTotoFormApp
             int defaultCouponCount,
             int defaultI15Min,
             int defaultI15Max,
-            int defaultInitialTopLimit,
-            int defaultDiversePrePool,
-            int defaultApiBudgetMultiplier,
-            int defaultApiConcurrency,
-            int defaultMinDistance,
-            int defaultMinDistanceFinal,
-            int defaultMonteCarlo)
+            RunDurationPreset defaultPreset)
         {
             var page = new TabPage(profileName);
 
@@ -733,10 +770,32 @@ namespace SporTotoFormApp
 
             couponCount.ValueChanged += (_, _) => UpdateTotalCouponCount();
 
+            var durationLabel = new Label
+            {
+                Text = "Calisma Suresi",
+                Location = new Point(12, 52),
+                Size = new Size(175, 20)
+            };
+
+            var durationPreset = new ComboBox
+            {
+                Location = new Point(190, 48),
+                Size = new Size(130, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            durationPreset.Items.AddRange(DurationPresets);
+            durationPreset.SelectedItem = defaultPreset;
+
+            _toolTip.SetToolTip(durationLabel, "Ortalama calisma suresine gore arama derinligi ayarlarini otomatik doldurur.");
+            _toolTip.SetToolTip(durationPreset, "Secim degisince TopK, havuz, API butcesi ve Monte Carlo ayarlari guncellenir.");
+
+            page.Controls.Add(durationLabel);
+            page.Controls.Add(durationPreset);
+
             var apiGroup = new GroupBox
             {
                 Text = "API Filtre Ayarlari",
-                Location = new Point(6, 52),
+                Location = new Point(6, 86),
                 Size = new Size(336, 96)
             };
 
@@ -761,7 +820,7 @@ namespace SporTotoFormApp
             var optimizationGroup = new GroupBox
             {
                 Text = "OptimizationOptions",
-                Location = new Point(6, 154),
+                Location = new Point(6, 188),
                 Size = new Size(336, 258)
             };
 
@@ -769,7 +828,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "InitialTopCandidateLimit",
                 "On skorlama sonrasi tutulacak maksimum aday kupon sayisi (Top-K).",
-                defaultInitialTopLimit,
+                defaultPreset.InitialTopCandidateLimit,
                 1000,
                 5000000,
                 24);
@@ -778,7 +837,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "DiversePrePoolLimit",
                 "Cesitlilik filtresi sonrasi API'ye gitmeden once tutulacak aday havuzu limiti.",
-                defaultDiversePrePool,
+                defaultPreset.DiversePrePoolLimit,
                 1000,
                 5000000,
                 58);
@@ -787,16 +846,16 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "ApiBudgetMultiplier",
                 "API'de degerlendirilecek kupon butcesi = hedef kolon * bu carpim.",
-                defaultApiBudgetMultiplier,
+                defaultPreset.ApiBudgetMultiplier,
                 1,
-                10000,
+                100000,
                 92);
 
             var apiConcurrency = AddNumericInput(
                 optimizationGroup,
                 "ApiConcurrency",
                 "Ayni anda kac API cagrisi yapilacagini belirler.",
-                defaultApiConcurrency,
+                defaultPreset.ApiConcurrency,
                 1,
                 128,
                 126);
@@ -805,7 +864,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MinHammingDistance",
                 "On havuzda iki kupon arasindaki minimum fark (karakter bazli mesafe).",
-                defaultMinDistance,
+                defaultPreset.MinHammingDistance,
                 1,
                 15,
                 160);
@@ -814,7 +873,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MinHammingDistanceFinal",
                 "Final secimde iki kupon arasindaki minimum fark.",
-                defaultMinDistanceFinal,
+                defaultPreset.MinHammingDistanceFinal,
                 1,
                 15,
                 194);
@@ -823,10 +882,26 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MonteCarloScenarioCount",
                 "Portfoy optimizasyonunda simulasyon icin uretilecek senaryo sayisi.",
-                defaultMonteCarlo,
+                defaultPreset.MonteCarloScenarioCount,
                 500,
-                1000000,
+                5000000,
                 228);
+
+            durationPreset.SelectedIndexChanged += (_, _) =>
+            {
+                if (durationPreset.SelectedItem is RunDurationPreset preset)
+                {
+                    ApplyDurationPreset(
+                        preset,
+                        initialTopLimit,
+                        diversePrePool,
+                        apiBudgetMultiplier,
+                        apiConcurrency,
+                        minDistance,
+                        minDistanceFinal,
+                        monteCarlo);
+                }
+            };
 
             page.Controls.Add(apiGroup);
             page.Controls.Add(optimizationGroup);
@@ -837,6 +912,7 @@ namespace SporTotoFormApp
                 couponCount,
                 i15Min,
                 i15Max,
+                durationPreset,
                 initialTopLimit,
                 diversePrePool,
                 apiBudgetMultiplier,
@@ -844,6 +920,30 @@ namespace SporTotoFormApp
                 minDistance,
                 minDistanceFinal,
                 monteCarlo);
+        }
+
+        private static void ApplyDurationPreset(
+            RunDurationPreset preset,
+            NumericUpDown initialTopLimit,
+            NumericUpDown diversePrePool,
+            NumericUpDown apiBudgetMultiplier,
+            NumericUpDown apiConcurrency,
+            NumericUpDown minDistance,
+            NumericUpDown minDistanceFinal,
+            NumericUpDown monteCarlo)
+        {
+            initialTopLimit.Value = ClampDecimal(preset.InitialTopCandidateLimit, initialTopLimit.Minimum, initialTopLimit.Maximum);
+            diversePrePool.Value = ClampDecimal(preset.DiversePrePoolLimit, diversePrePool.Minimum, diversePrePool.Maximum);
+            apiBudgetMultiplier.Value = ClampDecimal(preset.ApiBudgetMultiplier, apiBudgetMultiplier.Minimum, apiBudgetMultiplier.Maximum);
+            apiConcurrency.Value = ClampDecimal(preset.ApiConcurrency, apiConcurrency.Minimum, apiConcurrency.Maximum);
+            minDistance.Value = ClampDecimal(preset.MinHammingDistance, minDistance.Minimum, minDistance.Maximum);
+            minDistanceFinal.Value = ClampDecimal(preset.MinHammingDistanceFinal, minDistanceFinal.Minimum, minDistanceFinal.Maximum);
+            monteCarlo.Value = ClampDecimal(preset.MonteCarloScenarioCount, monteCarlo.Minimum, monteCarlo.Maximum);
+        }
+
+        private static decimal ClampDecimal(int value, decimal minimum, decimal maximum)
+        {
+            return Math.Clamp((decimal)value, minimum, maximum);
         }
 
         private NumericUpDown AddNumericInput(
@@ -1133,6 +1233,7 @@ namespace SporTotoFormApp
             NumericUpDown CouponCount,
             NumericUpDown I15Min,
             NumericUpDown I15Max,
+            ComboBox DurationPreset,
             NumericUpDown InitialTopCandidateLimit,
             NumericUpDown DiversePrePoolLimit,
             NumericUpDown ApiBudgetMultiplier,
@@ -1140,5 +1241,42 @@ namespace SporTotoFormApp
             NumericUpDown MinHammingDistance,
             NumericUpDown MinHammingDistanceFinal,
             NumericUpDown MonteCarloScenarioCount);
+
+        private sealed class RunDurationPreset
+        {
+            public RunDurationPreset(
+                string label,
+                int initialTopCandidateLimit,
+                int diversePrePoolLimit,
+                int apiBudgetMultiplier,
+                int apiConcurrency,
+                int minHammingDistance,
+                int minHammingDistanceFinal,
+                int monteCarloScenarioCount)
+            {
+                Label = label;
+                InitialTopCandidateLimit = initialTopCandidateLimit;
+                DiversePrePoolLimit = diversePrePoolLimit;
+                ApiBudgetMultiplier = apiBudgetMultiplier;
+                ApiConcurrency = apiConcurrency;
+                MinHammingDistance = minHammingDistance;
+                MinHammingDistanceFinal = minHammingDistanceFinal;
+                MonteCarloScenarioCount = monteCarloScenarioCount;
+            }
+
+            public string Label { get; }
+            public int InitialTopCandidateLimit { get; }
+            public int DiversePrePoolLimit { get; }
+            public int ApiBudgetMultiplier { get; }
+            public int ApiConcurrency { get; }
+            public int MinHammingDistance { get; }
+            public int MinHammingDistanceFinal { get; }
+            public int MonteCarloScenarioCount { get; }
+
+            public override string ToString()
+            {
+                return Label;
+            }
+        }
     }
 }
