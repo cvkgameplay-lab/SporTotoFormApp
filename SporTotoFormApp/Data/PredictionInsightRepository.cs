@@ -132,11 +132,12 @@ namespace SporTotoFormApp.Data
             if (nesinePopularity != null)
             {
                 AddWeightedCounts(
-                    new DistributionCounts(
+                    ConvertPercentagesToCounts(
                         nesinePopularity.Percentage1,
                         nesinePopularity.PercentageX,
-                        nesinePopularity.Percentage2),
-                    1.80,
+                        nesinePopularity.Percentage2,
+                        30),
+                    1.10,
                     "Nesine oynanma orani",
                     components,
                     ref count1,
@@ -163,7 +164,7 @@ namespace SporTotoFormApp.Data
                 {
                     AddWeightedCounts(
                         oddsCounts,
-                        1.15,
+                        1.00,
                         "Nesine oran olasiligi",
                         components,
                         ref count1,
@@ -176,7 +177,7 @@ namespace SporTotoFormApp.Data
             {
                 AddWeightedCounts(
                     ConvertFeatureSignalToCounts(feature.FeatureSignal),
-                    0.95,
+                    0.85,
                     "Nesine feature modeli",
                     components,
                     ref count1,
@@ -230,7 +231,14 @@ namespace SporTotoFormApp.Data
                 SELECT ResultSymbol
                 FROM
                 (
-                    SELECT TOP (18) hr.RoundId, m.ResultSymbol
+                    SELECT TOP (18)
+                        hr.RoundId,
+                        CASE
+                            WHEN m.ResultSymbol = 'X' THEN 'X'
+                            WHEN (m.HomeTeamName = @HomeTeamName AND m.ResultSymbol = '1')
+                              OR (m.AwayTeamName = @HomeTeamName AND m.ResultSymbol = '2') THEN '1'
+                            ELSE '2'
+                        END AS ResultSymbol
                     FROM HistoricalResultMatches m
                     INNER JOIN HistoricalResults hr ON hr.Id = m.HistoricalResultId
                     WHERE (m.HomeTeamName = @HomeTeamName OR m.AwayTeamName = @HomeTeamName)
@@ -241,7 +249,14 @@ namespace SporTotoFormApp.Data
                 SELECT ResultSymbol
                 FROM
                 (
-                    SELECT TOP (18) hr.RoundId, m.ResultSymbol
+                    SELECT TOP (18)
+                        hr.RoundId,
+                        CASE
+                            WHEN m.ResultSymbol = 'X' THEN 'X'
+                            WHEN (m.HomeTeamName = @AwayTeamName AND m.ResultSymbol = '1')
+                              OR (m.AwayTeamName = @AwayTeamName AND m.ResultSymbol = '2') THEN '2'
+                            ELSE '1'
+                        END AS ResultSymbol
                     FROM HistoricalResultMatches m
                     INNER JOIN HistoricalResults hr ON hr.Id = m.HistoricalResultId
                     WHERE (m.HomeTeamName = @AwayTeamName OR m.AwayTeamName = @AwayTeamName)
@@ -306,11 +321,29 @@ namespace SporTotoFormApp.Data
                 return new DistributionCounts();
             }
 
-            const int scale = 100;
+            const int scale = 30;
             return new DistributionCounts(
                 (int)Math.Round(p1 / sum * scale),
                 (int)Math.Round(px / sum * scale),
                 (int)Math.Round(p2 / sum * scale));
+        }
+
+        private static DistributionCounts ConvertPercentagesToCounts(
+            double percentage1,
+            double percentageX,
+            double percentage2,
+            int scale)
+        {
+            var sum = percentage1 + percentageX + percentage2;
+            if (sum <= 0)
+            {
+                return new DistributionCounts();
+            }
+
+            return new DistributionCounts(
+                (int)Math.Round(percentage1 / sum * scale),
+                (int)Math.Round(percentageX / sum * scale),
+                (int)Math.Round(percentage2 / sum * scale));
         }
 
         private static DistributionCounts ConvertFeatureSignalToCounts(double signal)
@@ -319,11 +352,13 @@ namespace SporTotoFormApp.Data
             var home = Math.Clamp(35 + clamped, 5, 75);
             var away = Math.Clamp(35 - clamped, 5, 75);
             var draw = Math.Clamp(30 - Math.Abs(clamped) * 0.25, 12, 45);
+            const int scale = 24;
+            var sum = home + draw + away;
 
             return new DistributionCounts(
-                (int)Math.Round(home),
-                (int)Math.Round(draw),
-                (int)Math.Round(away));
+                (int)Math.Round(home / sum * scale),
+                (int)Math.Round(draw / sum * scale),
+                (int)Math.Round(away / sum * scale));
         }
 
         private static IReadOnlyList<MatchInsightDetail> LoadMatchDetails(

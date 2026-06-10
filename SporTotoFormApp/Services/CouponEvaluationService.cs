@@ -74,10 +74,14 @@ namespace SporTotoFormApp.Services
             var k14 = ParsePositiveInt(bonus.i14);
             var k13 = ParsePositiveInt(bonus.i13);
 
-            // Core objective: maximize win probability while minimizing split risk.
-            var utility = (p15 / Math.Pow(k15 + 0.8, 1.12))
-                        + (0.34 * p14 / Math.Pow(k14 + 1.0, 1.08))
-                        + (0.16 * p13 / Math.Pow(k13 + 1.0, 1.04));
+            // Accuracy is the primary objective. Winner counts only apply a mild
+            // split-risk penalty after the model probability has been calculated.
+            var hitValue = p15 + (0.035 * p14) + (0.003 * p13);
+            var splitPenalty = 1.0
+                             + (0.025 * Math.Log(1.0 + k15))
+                             + (0.005 * Math.Log(1.0 + k14))
+                             + (0.002 * Math.Log(1.0 + k13));
+            var utility = hitValue / splitPenalty;
 
             return new CouponAnalysis
             {

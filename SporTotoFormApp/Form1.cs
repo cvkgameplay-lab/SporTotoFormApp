@@ -16,11 +16,14 @@ namespace SporTotoFormApp
         private ListView _currentMatchesList = null!;
         private ContextMenuStrip _currentMatchesMenu = null!;
         private Button _evaluateResultsButton = null!;
+        private Button _experimentButton = null!;
         private CurrentRoundInfo? _currentRound;
         private PredictionInsight? _predictionInsight;
         private NesineProgram? _nesineProgram;
         private IReadOnlyDictionary<int, NesineHeadToHeadSummary>? _nesineHeadToHeadByMatchNo;
         private IReadOnlyDictionary<int, MatchModelFeature>? _matchModelFeaturesByMatchNo;
+        private CancellationTokenSource? _experimentCts;
+        private int _experimentRunCounter;
         private static readonly RunDurationPreset[] DurationPresets =
         [
             new("1 saat", 3000000, 900000, 3000, 6, 4, 4, 300000),
@@ -220,6 +223,276 @@ namespace SporTotoFormApp
             {
                 _evaluateResultsButton.Enabled = true;
             }
+        }
+
+        private async void ExperimentButton_Click(object? sender, EventArgs e)
+        {
+            if (_experimentCts != null)
+            {
+                _experimentCts.Cancel();
+                _experimentButton.Enabled = false;
+                _experimentButton.Text = "DENEY DURDURULUYOR";
+                Log("Deney modu iptal istendi. Mevcut tur tamamlaninca duracak.", Color.Orange);
+                return;
+            }
+
+            var requests = BuildProfileRequests();
+            if (requests.Count == 0)
+            {
+                Log("Deney modu icin en az bir profilde kolon sayisi 1 veya daha buyuk olmali.", Color.OrangeRed);
+                return;
+            }
+
+            _experimentCts = new CancellationTokenSource();
+            button1.Enabled = false;
+            _evaluateResultsButton.Enabled = false;
+            _experimentButton.Text = "DENEY IPTAL";
+            _experimentButton.Enabled = true;
+
+            try
+            {
+                await RunExperimentLoopAsync(_experimentCts.Token);
+            }
+            catch (Exception ex)
+            {
+                Log($"Deney modu hatasi: {ex.Message}", Color.Crimson);
+            }
+            finally
+            {
+                _experimentCts?.Dispose();
+                _experimentCts = null;
+                button1.Enabled = true;
+                _evaluateResultsButton.Enabled = true;
+                _experimentButton.Enabled = true;
+                _experimentButton.Text = "DENEY MODU BASLAT";
+                Log("Deney modu durdu.", Color.Yellow);
+            }
+        }
+
+        private async Task RunExperimentLoopAsync(CancellationToken cancellationToken)
+        {
+            var experimentRound = _currentRound ?? await TryLoadExperimentRoundAsync(cancellationToken);
+            if (experimentRound == null)
+            {
+                Log("Deney modu baslatilamadi: tahmin haftasi belirlenemedi.", Color.OrangeRed);
+                return;
+            }
+
+            var experimentRoundId = experimentRound.RoundId;
+            Log(
+                $"Deney modu aktif. RoundId {experimentRoundId} ({experimentRound.RoundName}) degisene veya iptal edilene kadar yeni tahminler uretilecek.",
+                Color.DeepSkyBlue);
+
+            var historicalRefreshSucceeded = await RefreshHistoricalResultsAndEvaluateRunsAsync();
+            if (historicalRefreshSucceeded && _currentRound != null)
+            {
+                _predictionInsight = TryBuildPredictionInsight(
+                    _currentRound,
+                    _nesineProgram,
+                    _nesineHeadToHeadByMatchNo,
+                    _matchModelFeaturesByMatchNo);
+                Log("Deney modu icin DB tahmin modeli guncellendi.", Color.LightSteelBlue);
+            }
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (!await IsExperimentRoundStillCurrentAsync(experimentRoundId, cancellationToken))
+                {
+                    break;
+                }
+
+                _experimentRunCounter++;
+                var request = BuildExperimentRequest(_experimentRunCounter);
+
+                Log(
+                    $"Deney turu {_experimentRunCounter} basladi | Hedef kolon: {request.DesiredCouponCount} | {FormatOptionsForLog(request.Options)}",
+                    Color.DeepSkyBlue);
+
+                var watch = Stopwatch.StartNew();
+                var service = new MoneyFilterService(
+                    this,
+                    request.DesiredCouponCount,
+                    request.Options,
+                    _predictionInsight?.MatchProbabilities);
+
+                var coupons = await service.Run(
+                    persistOutputs: false,
+                    refreshHistoricalData: !historicalRefreshSucceeded,
+                    manageProgress: false);
+                historicalRefreshSucceeded = true;
+
+                var deduplicated = DeduplicateCoupons(coupons)
+                    .OrderByDescending(x => x.Utility)
+                    .Take(request.DesiredCouponCount)
+                    .ToList();
+
+                await SaveExperimentRunToDatabaseAsync(deduplicated, request, _experimentRunCounter);
+                UpdateCurrentMatchMatrix(deduplicated);
+                watch.Stop();
+
+                Log(
+                    $"Deney turu {_experimentRunCounter} tamamlandi | Uretilen: {deduplicated.Count} | Sure: {watch.Elapsed.TotalMinutes:F1} dk",
+                    Color.LimeGreen);
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
+        }
+
+        private async Task<CurrentRoundInfo?> TryLoadExperimentRoundAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(45));
+                return await new HistoricalResultsUpdateService()
+                    .GetLatestRoundForPredictionAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log($"Deney haftasi kontrol hatasi: {ex.Message}", Color.OrangeRed);
+                return null;
+            }
+        }
+
+        private async Task<bool> IsExperimentRoundStillCurrentAsync(
+            int experimentRoundId,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(45));
+                var latestRound = await new HistoricalResultsUpdateService()
+                    .GetLatestRoundForPredictionAsync(timeoutCts.Token);
+
+                if (latestRound == null)
+                {
+                    Log("Deney modu hafta kontrolu yapilamadi, mevcut round ile devam ediliyor.", Color.Orange);
+                    return true;
+                }
+
+                if (latestRound.RoundId == experimentRoundId)
+                {
+                    return true;
+                }
+
+                Log(
+                    $"Yeni tahmin haftasi algilandi. Eski RoundId: {experimentRoundId}, Yeni RoundId: {latestRound.RoundId}. Deney modu durduruldu.",
+                    Color.Yellow);
+                _currentRound = latestRound;
+                return false;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Deney modu hafta kontrolu zaman asimina ugradi, mevcut round ile devam ediliyor.", Color.Orange);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Deney modu hafta kontrol hatasi: {ex.Message}", Color.Orange);
+                return true;
+            }
+        }
+
+        private ProfileRunRequest BuildExperimentRequest(int iteration)
+        {
+            var baseRequest = BuildProfileRequests().First();
+            var options = baseRequest.Options;
+            var minI15 = Random.Shared.Next(0, 4) == 0
+                ? Math.Max(options.MinI15WinnerCount - 1, 1)
+                : options.MinI15WinnerCount;
+            var maxI15 = Random.Shared.Next(0, 4) == 0
+                ? Math.Min(options.MaxI15WinnerCount + 2, 20)
+                : options.MaxI15WinnerCount;
+            if (minI15 > maxI15)
+            {
+                maxI15 = minI15;
+            }
+
+            var varied = new OptimizationOptions
+            {
+                InitialTopCandidateLimit = VaryInt(options.InitialTopCandidateLimit, 0.82, 1.18, 1000, 5000000),
+                DiversePrePoolLimit = VaryInt(options.DiversePrePoolLimit, 0.70, 1.20, 1000, 5000000),
+                ApiBudgetMultiplier = VaryInt(options.ApiBudgetMultiplier, 0.55, 1.25, 1, 100000),
+                ApiConcurrency = VaryInt(options.ApiConcurrency, 0.75, 1.35, 1, 16),
+                MinHammingDistance = Random.Shared.Next(0, 3) switch
+                {
+                    0 => Math.Max(options.MinHammingDistance - 1, 1),
+                    1 => options.MinHammingDistance,
+                    _ => Math.Min(options.MinHammingDistance + 1, 15)
+                },
+                MinHammingDistanceFinal = Random.Shared.Next(0, 3) switch
+                {
+                    0 => Math.Max(options.MinHammingDistanceFinal - 1, 1),
+                    1 => options.MinHammingDistanceFinal,
+                    _ => Math.Min(options.MinHammingDistanceFinal + 1, 15)
+                },
+                MonteCarloScenarioCount = VaryInt(options.MonteCarloScenarioCount, 0.60, 1.35, 500, 5000000),
+                MinI15WinnerCount = minI15,
+                MaxI15WinnerCount = maxI15
+            };
+
+            return new ProfileRunRequest($"Deney #{iteration}", baseRequest.DesiredCouponCount, varied);
+        }
+
+        private static int VaryInt(int value, double minMultiplier, double maxMultiplier, int minimum, int maximum)
+        {
+            var factor = minMultiplier + Random.Shared.NextDouble() * (maxMultiplier - minMultiplier);
+            var varied = (int)Math.Round(value * factor);
+            return Math.Clamp(varied, minimum, maximum);
+        }
+
+        private async Task SaveExperimentRunToDatabaseAsync(
+            List<Coupon> coupons,
+            ProfileRunRequest request,
+            int iteration)
+        {
+            try
+            {
+                var profileNamesByPrediction = coupons
+                    .Select(x => NormalizePrediction(x.prediction))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(x => x, _ => request.Name, StringComparer.OrdinalIgnoreCase);
+                var context = BuildPredictionRunContext(request.Options);
+                var matrix = BuildPredictionRunMatrix(coupons);
+                var notes = $"Experiment run #{iteration} | {FormatOptionsForLog(request.Options)}";
+                var runId = await new PredictionRepository().SaveRunAsync(
+                    coupons,
+                    request.DesiredCouponCount,
+                    notes,
+                    profileNamesByPrediction,
+                    context,
+                    matrix);
+
+                Log($"Deney run DB'ye yazildi. RunId: {runId} | Matrix satiri: {matrix.Count}", Color.Yellow);
+            }
+            catch (Exception ex)
+            {
+                Log($"Deney DB yazim hatasi: {ex.Message}", Color.Crimson);
+            }
+        }
+
+        private static string FormatOptionsForLog(OptimizationOptions options)
+        {
+            return
+                $"i15:{options.MinI15WinnerCount}-{options.MaxI15WinnerCount} | " +
+                $"TopK:{options.InitialTopCandidateLimit:n0} | " +
+                $"Havuz:{options.DiversePrePoolLimit:n0} | " +
+                $"ApiCarpan:{options.ApiBudgetMultiplier:n0} | " +
+                $"Esz:{options.ApiConcurrency} | " +
+                $"Dist:{options.MinHammingDistance}/{options.MinHammingDistanceFinal} | " +
+                $"MC:{options.MonteCarloScenarioCount:n0}";
         }
 
         private async Task<bool> RefreshHistoricalResultsAndEvaluateRunsAsync()
@@ -671,6 +944,15 @@ namespace SporTotoFormApp
             };
             _evaluateResultsButton.Click += EvaluateResultsButton_Click;
             Controls.Add(_evaluateResultsButton);
+
+            _experimentButton = new Button
+            {
+                Location = new Point(580, 64),
+                Size = new Size(190, 36),
+                Text = "DENEY MODU BASLAT"
+            };
+            _experimentButton.Click += ExperimentButton_Click;
+            Controls.Add(_experimentButton);
 
             BuildCurrentRoundPanel();
 

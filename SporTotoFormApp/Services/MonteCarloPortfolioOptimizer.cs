@@ -23,9 +23,8 @@ namespace SporTotoFormApp.Services
             }
 
             var maxSameSymbolPerMatch = desiredCount >= 10
-                ? Math.Max(desiredCount - 2, 1)
+                ? Math.Max((int)Math.Ceiling(desiredCount * 0.90), 1)
                 : desiredCount;
-            var minimumAlternativeCoverage = desiredCount >= 10 ? 2 : 0;
             var outcomes = SimulateOutcomes();
             var scenarioScores = BuildScenarioScores(candidates, outcomes);
 
@@ -52,7 +51,11 @@ namespace SporTotoFormApp.Services
                         continue;
                     }
 
-                    if (ExceedsPerMatchSymbolCap(candidates[i].prediction, symbolCountsByMatch, maxSameSymbolPerMatch))
+                    if (ExceedsPerMatchSymbolCap(
+                        candidates[i].prediction,
+                        symbolCountsByMatch,
+                        desiredCount,
+                        maxSameSymbolPerMatch))
                     {
                         continue;
                     }
@@ -66,8 +69,13 @@ namespace SporTotoFormApp.Services
                         gain += improved - currentBest[s];
                     }
 
+                    gain /= _scenarioCount;
                     gain += candidates[i].Utility * 0.02;
-                    gain += CoverageBonus(candidates[i].prediction, symbolCountsByMatch, selected.Count, desiredCount, minimumAlternativeCoverage);
+                    gain += CoverageAdjustment(
+                        candidates[i].prediction,
+                        symbolCountsByMatch,
+                        selected.Count,
+                        desiredCount);
 
                     if (gain > bestGain)
                     {
@@ -112,14 +120,21 @@ namespace SporTotoFormApp.Services
             return result;
         }
 
-        private static bool ExceedsPerMatchSymbolCap(
+        private bool ExceedsPerMatchSymbolCap(
             string prediction,
             Dictionary<char, int>[] symbolCountsByMatch,
+            int desiredCount,
             int maxSameSymbolPerMatch)
         {
             for (var i = 0; i < prediction.Length; i++)
             {
-                if (symbolCountsByMatch[i][prediction[i]] >= maxSameSymbolPerMatch)
+                var probability = _model.GetForPosition(i).ForSymbol(prediction[i]);
+                var probabilityCap = Math.Max(
+                    2,
+                    (int)Math.Ceiling((probability + 0.18) * desiredCount));
+                var allowedCount = Math.Min(maxSameSymbolPerMatch, probabilityCap);
+
+                if (symbolCountsByMatch[i][prediction[i]] >= allowedCount)
                 {
                     return true;
                 }
@@ -128,42 +143,51 @@ namespace SporTotoFormApp.Services
             return false;
         }
 
-        private static double CoverageBonus(
+        private double CoverageAdjustment(
             string prediction,
             Dictionary<char, int>[] symbolCountsByMatch,
             int selectedCount,
-            int desiredCount,
-            int minimumAlternativeCoverage)
+            int desiredCount)
         {
-            if (minimumAlternativeCoverage <= 0)
+            if (desiredCount < 10)
             {
                 return 0.0;
             }
 
             var remainingAfterThis = desiredCount - selectedCount - 1;
-            var bonus = 0.0;
+            var adjustment = 0.0;
 
             for (var i = 0; i < prediction.Length; i++)
             {
                 var counts = symbolCountsByMatch[i];
                 var chosen = prediction[i];
-                var projectedChosenCount = counts[chosen] + 1;
-                var projectedMax = Math.Max(projectedChosenCount, counts.Where(x => x.Key != chosen).Max(x => x.Value));
-                var projectedAlternativeTotal = selectedCount + 1 - projectedMax;
+                var probabilities = _model.GetForPosition(i);
+                var chosenProbability = probabilities.ForSymbol(chosen);
+                var targetCount = chosenProbability * desiredCount;
 
-                if (projectedAlternativeTotal < minimumAlternativeCoverage)
-                {
-                    bonus += 0.002 * (minimumAlternativeCoverage - projectedAlternativeTotal);
-                }
+                adjustment += (targetCount - counts[chosen]) / desiredCount;
 
-                if (remainingAfterThis <= minimumAlternativeCoverage &&
-                    counts[chosen] == selectedCount)
+                foreach (var symbol in new[] { '1', 'X', '2' })
                 {
-                    bonus -= 0.01;
+                    var probability = probabilities.ForSymbol(symbol);
+                    if (probability < 0.12)
+                    {
+                        continue;
+                    }
+
+                    var projectedCount = counts[symbol] + (chosen == symbol ? 1 : 0);
+                    var minimumCoverage = Math.Max(
+                        1,
+                        (int)Math.Floor(probability * desiredCount * 0.35));
+
+                    if (projectedCount + remainingAfterThis < minimumCoverage)
+                    {
+                        adjustment -= 0.75;
+                    }
                 }
             }
 
-            return bonus;
+            return 0.08 * adjustment / prediction.Length;
         }
 
         private static void AddToSymbolCounts(string prediction, Dictionary<char, int>[] symbolCountsByMatch)

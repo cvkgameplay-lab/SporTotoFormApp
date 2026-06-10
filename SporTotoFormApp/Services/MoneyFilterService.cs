@@ -2,7 +2,6 @@
 using SporTotoFormApp.Data;
 using SporTotoFormApp.Interfaces;
 using SporTotoFormApp.Object;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 
@@ -87,7 +86,7 @@ namespace SporTotoFormApp.Services
             var client = new SporTotoClient();
             var apiFilteredCoupons = await EvaluateCandidatesWithApiAsync(apiCandidates, client, evaluator, manageProgress);
             apiWatch.Stop();
-            _view.Log($"API filtresini gecen kupon: {apiFilteredCoupons.Count:n0} | Sure: {apiWatch.Elapsed.TotalSeconds:F1} sn", Color.Yellow);
+            _view.Log($"API sonrasi tutulan aday: {apiFilteredCoupons.Count:n0} | Sure: {apiWatch.Elapsed.TotalSeconds:F1} sn", Color.Yellow);
 
             var monteCarloWatch = Stopwatch.StartNew();
             var selected = await Task.Run(() => SelectFinalCoupons(
@@ -222,12 +221,14 @@ namespace SporTotoFormApp.Services
             bool manageProgress)
         {
             var semaphore = new SemaphoreSlim(_options.ApiConcurrency);
-            var bag = new ConcurrentBag<Coupon>();
+            var retainedLimit = Math.Clamp(_options.DesiredCouponCount * 250, 5000, 20000);
+            var retained = new PriorityQueue<Coupon, double>();
+            var retainedLock = new object();
             var acceptedCounter = 0;
             var processedCounter = 0;
             var errorCounter = 0;
             var emptyResponseCounter = 0;
-            var i15RejectedCounter = 0;
+            var i15OutsideTargetCounter = 0;
             var progressLogInterval = Math.Max(250, candidates.Count / 1000);
 
             var nextIndex = -1;
@@ -260,8 +261,7 @@ namespace SporTotoFormApp.Services
 
                         if (i15 < _options.MinI15WinnerCount || i15 > _options.MaxI15WinnerCount)
                         {
-                            Interlocked.Increment(ref i15RejectedCounter);
-                            continue;
+                            Interlocked.Increment(ref i15OutsideTargetCounter);
                         }
 
                         var bonus = new Bonus
@@ -283,7 +283,19 @@ namespace SporTotoFormApp.Services
                             P13Probability = analysis.P13
                         };
 
-                        bag.Add(coupon);
+                        lock (retainedLock)
+                        {
+                            if (retained.Count < retainedLimit)
+                            {
+                                retained.Enqueue(coupon, coupon.Utility);
+                            }
+                            else if (retained.TryPeek(out var _, out var minimumUtility) &&
+                                     coupon.Utility > minimumUtility)
+                            {
+                                retained.Dequeue();
+                                retained.Enqueue(coupon, coupon.Utility);
+                            }
+                        }
 
                         var accepted = Interlocked.Increment(ref acceptedCounter);
                         if (manageProgress &&
@@ -326,10 +338,13 @@ namespace SporTotoFormApp.Services
             }
 
             _view.Log(
-                $"API ozet | Bos cevap: {emptyResponseCounter:n0} | i15 disi elenen: {i15RejectedCounter:n0} | Kabul: {acceptedCounter:n0}",
+                $"API ozet | Bos cevap: {emptyResponseCounter:n0} | i15 hedef disi: {i15OutsideTargetCounter:n0} | Degerlendirilen: {acceptedCounter:n0} | Tutulan: {retained.Count:n0}",
                 Color.LightSteelBlue);
 
-            return bag.ToList();
+            return retained.UnorderedItems
+                .Select(x => x.Element)
+                .OrderByDescending(x => x.Utility)
+                .ToList();
         }
 
         private List<Coupon> SelectFinalCoupons(
@@ -353,7 +368,10 @@ namespace SporTotoFormApp.Services
             _view.Log(
                 $"Monte Carlo portfoy optimizasyonu basladi | Aday: {ordered.Count:n0} | Senaryo: {_options.MonteCarloScenarioCount:n0}",
                 Color.DeepSkyBlue);
-            var optimizer = new MonteCarloPortfolioOptimizer(model, _options.MonteCarloScenarioCount);
+            var optimizer = new MonteCarloPortfolioOptimizer(
+                model,
+                _options.MonteCarloScenarioCount,
+                Random.Shared.Next());
             var selected = optimizer.SelectPortfolio(ordered, desiredCount, minDistance);
 
             foreach (var candidate in selected)
