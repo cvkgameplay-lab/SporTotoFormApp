@@ -23,65 +23,109 @@ namespace SporTotoFormApp.Services
             }
 
             var maxSameSymbolPerMatch = desiredCount >= 10
-                ? Math.Max((int)Math.Ceiling(desiredCount * 0.90), 1)
+                ? Math.Max((int)Math.Ceiling(desiredCount * 0.82), 1)
                 : desiredCount;
-            var outcomes = SimulateOutcomes();
-            var scenarioScores = BuildScenarioScores(candidates, outcomes);
 
             var selectedIndices = new List<int>(desiredCount);
             var selected = new List<Coupon>(desiredCount);
-            var currentBest = new double[_scenarioCount];
             var used = new bool[candidates.Count];
             var symbolCountsByMatch = CreateSymbolCounts();
+            var minimumCoverageTargets = CreateMinimumCoverageTargets(desiredCount);
+            var pairCoverage = new Dictionary<int, int>();
+            var candidateIndexByPrediction = candidates
+                .Select((coupon, index) => new { coupon.prediction, index })
+                .GroupBy(x => x.prediction, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(x => x.Key, x => x.First().index, StringComparer.OrdinalIgnoreCase);
 
-            for (var slot = 0; slot < desiredCount; slot++)
+            foreach (var target in CoverageScenarioGenerator.Generate(
+                         _model,
+                         Math.Min(desiredCount, 1024)))
             {
-                var bestIndex = -1;
-                var bestGain = double.MinValue;
-
-                for (var i = 0; i < candidates.Count; i++)
+                var targetIndex = candidateIndexByPrediction.GetValueOrDefault(target, -1);
+                if (targetIndex < 0 || used[targetIndex])
                 {
-                    if (used[i])
-                    {
-                        continue;
-                    }
+                    targetIndex = FindClosestTargetCandidate(target, candidates, used);
+                }
 
-                    if (selected.Count > 0 && selected.Any(x => Distance(x.prediction, candidates[i].prediction) < minDistance))
-                    {
-                        continue;
-                    }
+                if (targetIndex < 0)
+                {
+                    continue;
+                }
 
-                    if (ExceedsPerMatchSymbolCap(
-                        candidates[i].prediction,
+                AddSelectedCandidate(
+                    targetIndex,
+                    candidates,
+                    used,
+                    selectedIndices,
+                    selected,
+                    symbolCountsByMatch,
+                    pairCoverage);
+
+                if (selected.Count >= desiredCount)
+                {
+                    return selected;
+                }
+            }
+
+            var outcomes = SimulateOutcomes();
+            var scenarioScores = BuildScenarioScores(candidates, outcomes);
+            var currentBest = new byte[_scenarioCount];
+            foreach (var selectedIndex in selectedIndices)
+            {
+                UpdateCurrentBest(currentBest, scenarioScores[selectedIndex]);
+            }
+
+            for (var slot = selected.Count; slot < desiredCount; slot++)
+            {
+                var bestIndex = FindBestCandidate(
+                    candidates,
+                    scenarioScores,
+                    currentBest,
+                    used,
+                    symbolCountsByMatch,
+                    minimumCoverageTargets,
+                    pairCoverage,
+                    selected,
+                    desiredCount,
+                    minDistance,
+                    maxSameSymbolPerMatch,
+                    enforceDistance: true,
+                    enforceSymbolCap: true);
+
+                if (bestIndex == -1)
+                {
+                    bestIndex = FindBestCandidate(
+                        candidates,
+                        scenarioScores,
+                        currentBest,
+                        used,
                         symbolCountsByMatch,
+                        minimumCoverageTargets,
+                        pairCoverage,
+                        selected,
                         desiredCount,
-                        maxSameSymbolPerMatch))
-                    {
-                        continue;
-                    }
+                        Math.Max(1, minDistance - 1),
+                        maxSameSymbolPerMatch,
+                        enforceDistance: true,
+                        enforceSymbolCap: false);
+                }
 
-                    var gain = 0.0;
-                    var candidateScores = scenarioScores[i];
-
-                    for (var s = 0; s < _scenarioCount; s++)
-                    {
-                        var improved = Math.Max(currentBest[s], candidateScores[s]);
-                        gain += improved - currentBest[s];
-                    }
-
-                    gain /= _scenarioCount;
-                    gain += candidates[i].Utility * 0.02;
-                    gain += CoverageAdjustment(
-                        candidates[i].prediction,
+                if (bestIndex == -1)
+                {
+                    bestIndex = FindBestCandidate(
+                        candidates,
+                        scenarioScores,
+                        currentBest,
+                        used,
                         symbolCountsByMatch,
-                        selected.Count,
-                        desiredCount);
-
-                    if (gain > bestGain)
-                    {
-                        bestGain = gain;
-                        bestIndex = i;
-                    }
+                        minimumCoverageTargets,
+                        pairCoverage,
+                        selected,
+                        desiredCount,
+                        minDistance: 1,
+                        maxSameSymbolPerMatch,
+                        enforceDistance: false,
+                        enforceSymbolCap: false);
                 }
 
                 if (bestIndex == -1)
@@ -89,19 +133,145 @@ namespace SporTotoFormApp.Services
                     break;
                 }
 
-                used[bestIndex] = true;
-                selectedIndices.Add(bestIndex);
-                selected.Add(candidates[bestIndex]);
-                AddToSymbolCounts(candidates[bestIndex].prediction, symbolCountsByMatch);
-
-                var chosenScores = scenarioScores[bestIndex];
-                for (var s = 0; s < _scenarioCount; s++)
-                {
-                    currentBest[s] = Math.Max(currentBest[s], chosenScores[s]);
-                }
+                AddSelectedCandidate(
+                    bestIndex,
+                    candidates,
+                    used,
+                    selectedIndices,
+                    selected,
+                    symbolCountsByMatch,
+                    pairCoverage);
+                UpdateCurrentBest(currentBest, scenarioScores[bestIndex]);
             }
 
             return selected;
+        }
+
+        private int FindClosestTargetCandidate(
+            string target,
+            IReadOnlyList<Coupon> candidates,
+            IReadOnlyList<bool> used)
+        {
+            var bestIndex = -1;
+            var bestDistance = double.MaxValue;
+            var bestUtility = double.MinValue;
+
+            for (var candidateIndex = 0; candidateIndex < candidates.Count; candidateIndex++)
+            {
+                if (used[candidateIndex])
+                {
+                    continue;
+                }
+
+                var prediction = candidates[candidateIndex].prediction;
+                var distance = 0.0;
+                for (var matchIndex = 0; matchIndex < target.Length; matchIndex++)
+                {
+                    if (prediction[matchIndex] != target[matchIndex])
+                    {
+                        distance += 1.0 +
+                            _model.GetForPosition(matchIndex).ForSymbol(target[matchIndex]);
+                    }
+                }
+
+                if (distance < bestDistance ||
+                    (Math.Abs(distance - bestDistance) < 1e-9 &&
+                     candidates[candidateIndex].Utility > bestUtility))
+                {
+                    bestDistance = distance;
+                    bestUtility = candidates[candidateIndex].Utility;
+                    bestIndex = candidateIndex;
+                }
+            }
+
+            return bestIndex;
+        }
+
+        private static void AddSelectedCandidate(
+            int candidateIndex,
+            IReadOnlyList<Coupon> candidates,
+            bool[] used,
+            List<int> selectedIndices,
+            List<Coupon> selected,
+            Dictionary<char, int>[] symbolCountsByMatch,
+            Dictionary<int, int> pairCoverage)
+        {
+            used[candidateIndex] = true;
+            selectedIndices.Add(candidateIndex);
+            selected.Add(candidates[candidateIndex]);
+            AddToSymbolCounts(candidates[candidateIndex].prediction, symbolCountsByMatch);
+            AddToPairCoverage(candidates[candidateIndex].prediction, pairCoverage);
+        }
+
+        private int FindBestCandidate(
+            List<Coupon> candidates,
+            List<byte[]> scenarioScores,
+            byte[] currentBest,
+            bool[] used,
+            Dictionary<char, int>[] symbolCountsByMatch,
+            Dictionary<char, int>[] minimumCoverageTargets,
+            Dictionary<int, int> pairCoverage,
+            List<Coupon> selected,
+            int desiredCount,
+            int minDistance,
+            int maxSameSymbolPerMatch,
+            bool enforceDistance,
+            bool enforceSymbolCap)
+        {
+            var bestIndex = -1;
+            var bestGain = double.MinValue;
+
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                if (used[i])
+                {
+                    continue;
+                }
+
+                if (enforceDistance &&
+                    selected.Count > 0 &&
+                    selected.Any(x => Distance(x.prediction, candidates[i].prediction) < minDistance))
+                {
+                    continue;
+                }
+
+                if (enforceSymbolCap &&
+                    ExceedsPerMatchSymbolCap(
+                        candidates[i].prediction,
+                        symbolCountsByMatch,
+                        desiredCount,
+                        maxSameSymbolPerMatch))
+                {
+                    continue;
+                }
+
+                var gain = 0.0;
+                var candidateScores = scenarioScores[i];
+
+                for (var s = 0; s < _scenarioCount; s++)
+                {
+                    var improved = Math.Max(currentBest[s], candidateScores[s]);
+                    gain += ScoreForHits(improved) - ScoreForHits(currentBest[s]);
+                }
+
+                gain /= _scenarioCount;
+                gain += candidates[i].Utility * 0.02;
+                gain += CoverageAdjustment(
+                    candidates[i].prediction,
+                    symbolCountsByMatch,
+                    minimumCoverageTargets,
+                    pairCoverage,
+                    selected.Count,
+                    desiredCount);
+
+                if (gain > bestGain)
+                {
+                    bestGain = gain;
+                    bestIndex = i;
+                }
+            }
+
+            return bestIndex;
         }
 
         private static Dictionary<char, int>[] CreateSymbolCounts()
@@ -146,6 +316,8 @@ namespace SporTotoFormApp.Services
         private double CoverageAdjustment(
             string prediction,
             Dictionary<char, int>[] symbolCountsByMatch,
+            Dictionary<char, int>[] minimumCoverageTargets,
+            Dictionary<int, int> pairCoverage,
             int selectedCount,
             int desiredCount)
         {
@@ -164,30 +336,94 @@ namespace SporTotoFormApp.Services
                 var probabilities = _model.GetForPosition(i);
                 var chosenProbability = probabilities.ForSymbol(chosen);
                 var targetCount = chosenProbability * desiredCount;
+                var minimumTarget = minimumCoverageTargets[i][chosen];
+                var minimumDeficit = minimumTarget - counts[chosen];
 
                 adjustment += (targetCount - counts[chosen]) / desiredCount;
+                if (minimumDeficit > 0)
+                {
+                    adjustment += 2.5 * minimumDeficit / Math.Max(minimumTarget, 1);
+                }
 
                 foreach (var symbol in new[] { '1', 'X', '2' })
                 {
-                    var probability = probabilities.ForSymbol(symbol);
-                    if (probability < 0.12)
-                    {
-                        continue;
-                    }
-
                     var projectedCount = counts[symbol] + (chosen == symbol ? 1 : 0);
-                    var minimumCoverage = Math.Max(
-                        1,
-                        (int)Math.Floor(probability * desiredCount * 0.35));
+                    var minimumCoverage = minimumCoverageTargets[i][symbol];
 
-                    if (projectedCount + remainingAfterThis < minimumCoverage)
+                    if (minimumCoverage > 0 &&
+                        projectedCount + remainingAfterThis < minimumCoverage)
                     {
-                        adjustment -= 0.75;
+                        adjustment -= 2.0;
                     }
                 }
             }
 
-            return 0.08 * adjustment / prediction.Length;
+            var pairNovelty = PairCoverageAdjustment(prediction, pairCoverage);
+            return (0.22 * adjustment / prediction.Length) + pairNovelty;
+        }
+
+        private double PairCoverageAdjustment(
+            string prediction,
+            IReadOnlyDictionary<int, int> pairCoverage)
+        {
+            var eligiblePairs = 0;
+            var novelty = 0.0;
+
+            for (var left = 0; left < prediction.Length; left++)
+            {
+                var leftProbability = _model.GetForPosition(left).ForSymbol(prediction[left]);
+                if (leftProbability < 0.10)
+                {
+                    continue;
+                }
+
+                for (var right = left + 1; right < prediction.Length; right++)
+                {
+                    var rightProbability = _model.GetForPosition(right).ForSymbol(prediction[right]);
+                    if (rightProbability < 0.10)
+                    {
+                        continue;
+                    }
+
+                    eligiblePairs++;
+                    var key = PairKey(left, prediction[left], right, prediction[right]);
+                    var count = pairCoverage.GetValueOrDefault(key);
+                    novelty += 1.0 / (1.0 + count);
+                }
+            }
+
+            return eligiblePairs == 0
+                ? 0.0
+                : 0.06 * novelty / eligiblePairs;
+        }
+
+        private Dictionary<char, int>[] CreateMinimumCoverageTargets(int desiredCount)
+        {
+            var result = CreateSymbolCounts();
+            if (desiredCount < 10)
+            {
+                return result;
+            }
+
+            for (var i = 0; i < result.Length; i++)
+            {
+                var probabilities = _model.GetForPosition(i);
+                foreach (var symbol in new[] { '1', 'X', '2' })
+                {
+                    var probability = probabilities.ForSymbol(symbol);
+                    if (probability < 0.10)
+                    {
+                        continue;
+                    }
+
+                    var target = probability >= 0.18
+                        ? (int)Math.Floor(probability * desiredCount * 0.45)
+                        : 1;
+                    result[i][symbol] = Math.Clamp(target, 1, Math.Max(1, desiredCount / 2));
+                }
+            }
+
+            return result;
         }
 
         private static void AddToSymbolCounts(string prediction, Dictionary<char, int>[] symbolCountsByMatch)
@@ -196,6 +432,36 @@ namespace SporTotoFormApp.Services
             {
                 symbolCountsByMatch[i][prediction[i]]++;
             }
+        }
+
+        private static void AddToPairCoverage(
+            string prediction,
+            Dictionary<int, int> pairCoverage)
+        {
+            for (var left = 0; left < prediction.Length; left++)
+            {
+                for (var right = left + 1; right < prediction.Length; right++)
+                {
+                    var key = PairKey(left, prediction[left], right, prediction[right]);
+                    pairCoverage[key] = pairCoverage.GetValueOrDefault(key) + 1;
+                }
+            }
+        }
+
+        private static int PairKey(int left, char leftSymbol, int right, char rightSymbol)
+        {
+            return ((((left * 15) + right) * 3) + SymbolIndex(leftSymbol)) * 3 +
+                   SymbolIndex(rightSymbol);
+        }
+
+        private static int SymbolIndex(char symbol)
+        {
+            return symbol switch
+            {
+                '1' => 0,
+                'X' => 1,
+                _ => 2
+            };
         }
 
         private List<char[]> SimulateOutcomes()
@@ -217,13 +483,13 @@ namespace SporTotoFormApp.Services
             return scenarios;
         }
 
-        private List<double[]> BuildScenarioScores(List<Coupon> candidates, List<char[]> outcomes)
+        private List<byte[]> BuildScenarioScores(List<Coupon> candidates, List<char[]> outcomes)
         {
-            var result = new List<double[]>(candidates.Count);
+            var result = new List<byte[]>(candidates.Count);
 
             foreach (var coupon in candidates)
             {
-                var scores = new double[_scenarioCount];
+                var scores = new byte[_scenarioCount];
 
                 for (var s = 0; s < _scenarioCount; s++)
                 {
@@ -238,20 +504,38 @@ namespace SporTotoFormApp.Services
                         }
                     }
 
-                    scores[s] = correct switch
-                    {
-                        15 => 1.00,
-                        14 => 0.33,
-                        13 => 0.10,
-                        12 => 0.03,
-                        _ => 0.0
-                    };
+                    scores[s] = (byte)correct;
                 }
 
                 result.Add(scores);
             }
 
             return result;
+        }
+
+        private static void UpdateCurrentBest(byte[] currentBest, byte[] candidateScores)
+        {
+            for (var scenarioIndex = 0; scenarioIndex < currentBest.Length; scenarioIndex++)
+            {
+                currentBest[scenarioIndex] = Math.Max(
+                    currentBest[scenarioIndex],
+                    candidateScores[scenarioIndex]);
+            }
+        }
+
+        private static double ScoreForHits(int correct)
+        {
+            return correct switch
+            {
+                15 => 1.00,
+                14 => 0.40,
+                13 => 0.16,
+                12 => 0.06,
+                11 => 0.020,
+                10 => 0.006,
+                9 => 0.0015,
+                _ => 0.0
+            };
         }
 
         private static int Distance(string left, string right)
@@ -267,5 +551,50 @@ namespace SporTotoFormApp.Services
 
             return diff;
         }
+    }
+
+    public static class CoverageScenarioGenerator
+    {
+        public static IReadOnlyList<string> Generate(
+            HistoricalOutcomeModel model,
+            int maximumCount)
+        {
+            var targetCount = Math.Clamp(maximumCount, 1, 32768);
+            var states = new List<CoverageScenarioState>
+            {
+                new(string.Empty, 0.0)
+            };
+
+            for (var matchIndex = 0; matchIndex < 15; matchIndex++)
+            {
+                var probabilities = model.GetForPosition(matchIndex);
+                var choices = new[]
+                    {
+                        new CoverageChoice('1', probabilities.One),
+                        new CoverageChoice('X', probabilities.Draw),
+                        new CoverageChoice('2', probabilities.Two)
+                    }
+                    .OrderByDescending(x => x.Probability)
+                    .Take(2)
+                    .ToArray();
+
+                states = states
+                    .SelectMany(state => choices.Select(choice =>
+                        new CoverageScenarioState(
+                            state.Prediction + choice.Symbol,
+                            state.LogProbability +
+                            Math.Log(Math.Max(choice.Probability, 1e-12)))))
+                    .OrderByDescending(x => x.LogProbability)
+                    .Take(targetCount)
+                    .ToList();
+            }
+
+            return states.Select(x => x.Prediction).ToList();
+        }
+
+        private sealed record CoverageChoice(char Symbol, double Probability);
+        private sealed record CoverageScenarioState(
+            string Prediction,
+            double LogProbability);
     }
 }

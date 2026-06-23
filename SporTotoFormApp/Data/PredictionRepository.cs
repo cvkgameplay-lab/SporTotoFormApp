@@ -308,6 +308,13 @@ namespace SporTotoFormApp.Data
                         UsedNesinePopularity BIT NOT NULL,
                         UsedHeadToHead BIT NOT NULL,
                         UsedFeatureModel BIT NOT NULL,
+                        UsedTeamEnsemble BIT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_UsedTeamEnsemble DEFAULT 0,
+                        EnsembleCalibrationSampleCount INT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_EnsembleCalibration DEFAULT 0,
+                        EnsembleEloWeight FLOAT NULL,
+                        EnsembleDixonColesWeight FLOAT NULL,
+                        EnsembleEloTemperature FLOAT NULL,
+                        EnsembleDixonColesTemperature FLOAT NULL,
+                        EnsembleMatchCount INT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_EnsembleMatchCount DEFAULT 0,
                         I15Min INT NOT NULL,
                         I15Max INT NOT NULL,
                         InitialTopCandidateLimit INT NOT NULL,
@@ -321,6 +328,33 @@ namespace SporTotoFormApp.Data
                         CONSTRAINT FK_PredictionRunModelInfo_PredictionRuns FOREIGN KEY (RunId) REFERENCES dbo.PredictionRuns(Id)
                     );
                 END;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'UsedTeamEnsemble') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD UsedTeamEnsemble BIT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_UsedTeamEnsemble DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleCalibrationSampleCount') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD EnsembleCalibrationSampleCount INT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_EnsembleCalibration DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleEloWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo ADD EnsembleEloWeight FLOAT NULL;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleDixonColesWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo ADD EnsembleDixonColesWeight FLOAT NULL;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleEloTemperature') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo ADD EnsembleEloTemperature FLOAT NULL;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleDixonColesTemperature') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo ADD EnsembleDixonColesTemperature FLOAT NULL;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'EnsembleMatchCount') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD EnsembleMatchCount INT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_EnsembleMatchCount DEFAULT 0 WITH VALUES;
 
                 IF OBJECT_ID('dbo.PredictionRunMatchMatrix', 'U') IS NULL
                 BEGIN
@@ -436,13 +470,19 @@ namespace SporTotoFormApp.Data
                 """
                 INSERT INTO PredictionRunModelInfo
                     (RunId, RoundId, RoundName, NesineProgramNo,
-                     UsedNesinePopularity, UsedHeadToHead, UsedFeatureModel,
+                     UsedNesinePopularity, UsedHeadToHead, UsedFeatureModel, UsedTeamEnsemble,
+                     EnsembleCalibrationSampleCount, EnsembleEloWeight,
+                     EnsembleDixonColesWeight, EnsembleEloTemperature,
+                     EnsembleDixonColesTemperature, EnsembleMatchCount,
                      I15Min, I15Max, InitialTopCandidateLimit, DiversePrePoolLimit,
                      ApiBudgetMultiplier, ApiConcurrency, MinHammingDistance,
                      MinHammingDistanceFinal, MonteCarloScenarioCount)
                 VALUES
                     (@RunId, @RoundId, @RoundName, @NesineProgramNo,
-                     @UsedNesinePopularity, @UsedHeadToHead, @UsedFeatureModel,
+                     @UsedNesinePopularity, @UsedHeadToHead, @UsedFeatureModel, @UsedTeamEnsemble,
+                     @EnsembleCalibrationSampleCount, @EnsembleEloWeight,
+                     @EnsembleDixonColesWeight, @EnsembleEloTemperature,
+                     @EnsembleDixonColesTemperature, @EnsembleMatchCount,
                      @I15Min, @I15Max, @InitialTopCandidateLimit, @DiversePrePoolLimit,
                      @ApiBudgetMultiplier, @ApiConcurrency, @MinHammingDistance,
                      @MinHammingDistanceFinal, @MonteCarloScenarioCount);
@@ -457,6 +497,23 @@ namespace SporTotoFormApp.Data
             command.Parameters.AddWithValue("@UsedNesinePopularity", context.UsedNesinePopularity);
             command.Parameters.AddWithValue("@UsedHeadToHead", context.UsedHeadToHead);
             command.Parameters.AddWithValue("@UsedFeatureModel", context.UsedFeatureModel);
+            command.Parameters.AddWithValue("@UsedTeamEnsemble", context.UsedTeamEnsemble);
+            command.Parameters.AddWithValue(
+                "@EnsembleCalibrationSampleCount",
+                context.EnsembleCalibrationSampleCount);
+            command.Parameters.AddWithValue(
+                "@EnsembleEloWeight",
+                (object?)context.EnsembleEloWeight ?? DBNull.Value);
+            command.Parameters.AddWithValue(
+                "@EnsembleDixonColesWeight",
+                (object?)context.EnsembleDixonColesWeight ?? DBNull.Value);
+            command.Parameters.AddWithValue(
+                "@EnsembleEloTemperature",
+                (object?)context.EnsembleEloTemperature ?? DBNull.Value);
+            command.Parameters.AddWithValue(
+                "@EnsembleDixonColesTemperature",
+                (object?)context.EnsembleDixonColesTemperature ?? DBNull.Value);
+            command.Parameters.AddWithValue("@EnsembleMatchCount", context.EnsembleMatchCount);
             command.Parameters.AddWithValue("@I15Min", context.Options.MinI15WinnerCount);
             command.Parameters.AddWithValue("@I15Max", context.Options.MaxI15WinnerCount);
             command.Parameters.AddWithValue("@InitialTopCandidateLimit", context.Options.InitialTopCandidateLimit);
@@ -657,6 +714,13 @@ namespace SporTotoFormApp.Data
         bool UsedNesinePopularity,
         bool UsedHeadToHead,
         bool UsedFeatureModel,
+        bool UsedTeamEnsemble,
+        int EnsembleCalibrationSampleCount,
+        double? EnsembleEloWeight,
+        double? EnsembleDixonColesWeight,
+        double? EnsembleEloTemperature,
+        double? EnsembleDixonColesTemperature,
+        int EnsembleMatchCount,
         OptimizationOptions Options);
 
     public sealed record PredictionRunMatchMatrixRow(

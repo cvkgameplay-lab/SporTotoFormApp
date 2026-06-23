@@ -87,7 +87,10 @@ namespace SporTotoFormApp.Services
             {
                 for (var i = 0; i < MatchCount; i++)
                 {
-                    result[i] = SymbolProbabilities.Blend(result[i], currentRoundProbabilities[i], 0.62);
+                    // Current-round probabilities already include team history,
+                    // form, market, H2H and calibrated team models. A generic
+                    // "match position" prior can reverse match-specific signals.
+                    result[i] = currentRoundProbabilities[i];
                 }
 
                 usedCurrentRoundBlend = true;

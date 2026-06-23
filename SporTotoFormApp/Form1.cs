@@ -21,15 +21,15 @@ namespace SporTotoFormApp
         private PredictionInsight? _predictionInsight;
         private NesineProgram? _nesineProgram;
         private IReadOnlyDictionary<int, NesineHeadToHeadSummary>? _nesineHeadToHeadByMatchNo;
+        private IReadOnlyDictionary<int, IReadOnlyList<NesineHeadToHeadExtraSnapshot>>? _nesineHeadToHeadExtrasByMatchNo;
         private IReadOnlyDictionary<int, MatchModelFeature>? _matchModelFeaturesByMatchNo;
+        private IReadOnlyDictionary<int, NesineTeamContextFeature>? _nesineTeamContextByTeamId;
+        private IReadOnlyDictionary<int, TeamModelPrediction>? _teamModelPredictionsByMatchNo;
+        private IReadOnlyList<NesineMatchTeamIds>? _resolvedNesineMatches;
+        private TeamModelEnsembleResult? _teamModelEnsemble;
+        private DateTime _experimentModelRefreshedAtUtc = DateTime.MinValue;
         private CancellationTokenSource? _experimentCts;
         private int _experimentRunCounter;
-        private static readonly RunDurationPreset[] DurationPresets =
-        [
-            new("1 saat", 3000000, 900000, 3000, 6, 4, 4, 300000),
-            new("4 saat", 5000000, 1500000, 12000, 6, 4, 4, 700000),
-            new("8 saat", 5000000, 3000000, 24000, 6, 4, 4, 1000000)
-        ];
 
         public int ProgressBarValue
         {
@@ -278,27 +278,37 @@ namespace SporTotoFormApp
                 return;
             }
 
+            if (_nesineProgram == null || _currentRound?.RoundId != experimentRound.RoundId)
+            {
+                await LoadCurrentRoundMatchesAsync(cancellationToken);
+                experimentRound = _currentRound ?? experimentRound;
+            }
+
             var experimentRoundId = experimentRound.RoundId;
+            _currentRound = experimentRound;
             Log(
                 $"Deney modu aktif. RoundId {experimentRoundId} ({experimentRound.RoundName}) degisene veya iptal edilene kadar yeni tahminler uretilecek.",
                 Color.DeepSkyBlue);
 
             var historicalRefreshSucceeded = await RefreshHistoricalResultsAndEvaluateRunsAsync();
-            if (historicalRefreshSucceeded && _currentRound != null)
-            {
-                _predictionInsight = TryBuildPredictionInsight(
-                    _currentRound,
-                    _nesineProgram,
-                    _nesineHeadToHeadByMatchNo,
-                    _matchModelFeaturesByMatchNo);
-                Log("Deney modu icin DB tahmin modeli guncellendi.", Color.LightSteelBlue);
-            }
+            await RefreshExperimentPredictionModelAsync(
+                experimentRound,
+                cancellationToken,
+                "baslangic");
 
             while (!cancellationToken.IsCancellationRequested)
             {
                 if (!await IsExperimentRoundStillCurrentAsync(experimentRoundId, cancellationToken))
                 {
                     break;
+                }
+
+                if (DateTime.UtcNow - _experimentModelRefreshedAtUtc >= TimeSpan.FromHours(6))
+                {
+                    await RefreshExperimentPredictionModelAsync(
+                        experimentRound,
+                        cancellationToken,
+                        "periyodik");
                 }
 
                 _experimentRunCounter++;
@@ -422,23 +432,23 @@ namespace SporTotoFormApp
 
             var varied = new OptimizationOptions
             {
-                InitialTopCandidateLimit = VaryInt(options.InitialTopCandidateLimit, 0.82, 1.18, 1000, 5000000),
-                DiversePrePoolLimit = VaryInt(options.DiversePrePoolLimit, 0.70, 1.20, 1000, 5000000),
-                ApiBudgetMultiplier = VaryInt(options.ApiBudgetMultiplier, 0.55, 1.25, 1, 100000),
-                ApiConcurrency = VaryInt(options.ApiConcurrency, 0.75, 1.35, 1, 16),
-                MinHammingDistance = Random.Shared.Next(0, 3) switch
+                InitialTopCandidateLimit = VaryInt(options.InitialTopCandidateLimit, 0.90, 1.10, 1000, 5000000),
+                DiversePrePoolLimit = VaryInt(options.DiversePrePoolLimit, 0.85, 1.15, 1000, 5000000),
+                ApiBudgetMultiplier = options.ApiBudgetMultiplier,
+                ApiConcurrency = options.ApiConcurrency,
+                MinHammingDistance = Random.Shared.Next(0, 10) switch
                 {
-                    0 => Math.Max(options.MinHammingDistance - 1, 1),
-                    1 => options.MinHammingDistance,
-                    _ => Math.Min(options.MinHammingDistance + 1, 15)
+                    < 7 => 3,
+                    < 9 => 4,
+                    _ => 2
                 },
-                MinHammingDistanceFinal = Random.Shared.Next(0, 3) switch
+                MinHammingDistanceFinal = Random.Shared.Next(0, 10) switch
                 {
-                    0 => Math.Max(options.MinHammingDistanceFinal - 1, 1),
-                    1 => options.MinHammingDistanceFinal,
-                    _ => Math.Min(options.MinHammingDistanceFinal + 1, 15)
+                    < 7 => 3,
+                    < 9 => 4,
+                    _ => 2
                 },
-                MonteCarloScenarioCount = VaryInt(options.MonteCarloScenarioCount, 0.60, 1.35, 500, 5000000),
+                MonteCarloScenarioCount = VaryInt(options.MonteCarloScenarioCount, 0.85, 1.15, 500, 5000000),
                 MinI15WinnerCount = minI15,
                 MaxI15WinnerCount = maxI15
             };
@@ -466,7 +476,8 @@ namespace SporTotoFormApp
                     .ToDictionary(x => x, _ => request.Name, StringComparer.OrdinalIgnoreCase);
                 var context = BuildPredictionRunContext(request.Options);
                 var matrix = BuildPredictionRunMatrix(coupons);
-                var notes = $"Experiment run #{iteration} | {FormatOptionsForLog(request.Options)}";
+                var notes =
+                    $"Experiment run #{iteration} | {FormatOptionsForLog(request.Options)} | {FormatTeamModelForLog()}";
                 var runId = await new PredictionRepository().SaveRunAsync(
                     coupons,
                     request.DesiredCouponCount,
@@ -554,14 +565,17 @@ namespace SporTotoFormApp
             return historicalRefreshSucceeded;
         }
 
-        private async Task LoadCurrentRoundMatchesAsync()
+        private async Task LoadCurrentRoundMatchesAsync(
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 _currentRoundLabel.Text = "Tahmin haftasi maclari yukleniyor...";
                 _currentMatchesList.Items.Clear();
 
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromMinutes(3));
                 var currentRound = await new HistoricalResultsUpdateService()
                     .GetLatestRoundForPredictionAsync(timeoutCts.Token);
 
@@ -573,6 +587,7 @@ namespace SporTotoFormApp
                 }
 
                 _currentRound = currentRound;
+                _teamModelPredictionsByMatchNo = null;
                 _nesineProgram = await TryLoadNesineProgramAsync(timeoutCts.Token);
                 if (_nesineProgram != null)
                 {
@@ -634,6 +649,10 @@ namespace SporTotoFormApp
                         Log($"Nesine raw feature modeli eklendi: {_matchModelFeaturesByMatchNo.Count} mac", Color.LightSteelBlue);
                     }
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (OperationCanceledException)
             {
@@ -706,8 +725,27 @@ namespace SporTotoFormApp
 
                 var inserted = await new NesineHeadToHeadRepository()
                     .SaveSnapshotsAsync(currentRound, nesineProgram, result, extras, cancellationToken);
+                _nesineHeadToHeadExtrasByMatchNo = extras;
                 var extraWithData = extras.Values.SelectMany(x => x).Count(x => x.HasData);
                 Log($"Nesine H2H snapshot DB'ye yazildi: {inserted} satir | Ek endpoint veri: {extraWithData}", Color.LightSteelBlue);
+
+                try
+                {
+                    await TryRefreshNesineTeamMatchesAsync(
+                        currentRound,
+                        nesineProgram,
+                        result,
+                        extras,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    Log("Nesine takim mac gecmisi zaman asimina ugradi; mevcut H2H verisiyle devam.", Color.Orange);
+                }
+                catch (Exception ex)
+                {
+                    Log($"Nesine takim mac gecmisi guncelleme hatasi: {ex.Message}", Color.OrangeRed);
+                }
 
                 return result;
             }
@@ -716,6 +754,203 @@ namespace SporTotoFormApp
                 Log($"Nesine H2H verisi alinamadi: {ex.Message}", Color.OrangeRed);
                 return null;
             }
+        }
+
+        private async Task TryRefreshNesineTeamMatchesAsync(
+            CurrentRoundInfo currentRound,
+            NesineProgram nesineProgram,
+            IReadOnlyDictionary<int, NesineHeadToHeadSummary> summaries,
+            IReadOnlyDictionary<int, IReadOnlyList<NesineHeadToHeadExtraSnapshot>> extras,
+            CancellationToken cancellationToken)
+        {
+            var resolvedMatches = new List<NesineMatchTeamIds>();
+
+            foreach (var match in nesineProgram.Matches.Values.OrderBy(x => x.MatchNo))
+            {
+                summaries.TryGetValue(match.MatchNo, out var summary);
+                extras.TryGetValue(match.MatchNo, out var matchExtras);
+
+                var resolved = NesineTeamIdentityResolver.Resolve(match, summary, matchExtras);
+                if (resolved != null)
+                {
+                    resolvedMatches.Add(resolved);
+                }
+            }
+
+            var matchOrderByTeamId = resolvedMatches
+                .SelectMany(x => new[]
+                {
+                    new KeyValuePair<int, int>(x.HomeTeam.TeamId, x.MatchOrder),
+                    new KeyValuePair<int, int>(x.AwayTeam.TeamId, x.MatchOrder)
+                })
+                .GroupBy(x => x.Key)
+                .ToDictionary(x => x.Key, x => x.Min(y => y.Value));
+            _resolvedNesineMatches = resolvedMatches;
+
+            if (matchOrderByTeamId.Count == 0)
+            {
+                Log("Nesine takim kimlikleri cozumlenemedi; takim mac gecmisi atlandi.", Color.Orange);
+                return;
+            }
+
+            var repository = new NesineTeamMatchRepository();
+            var teamIdsToRefresh = await repository.GetTeamIdsNeedingRefreshAsync(
+                matchOrderByTeamId.Keys,
+                TimeSpan.FromHours(6),
+                cancellationToken);
+
+            var feeds = new List<NesineTeamMatchFeed>();
+            if (teamIdsToRefresh.Count > 0)
+            {
+                var service = new NesineTeamMatchesService();
+                using var semaphore = new SemaphoreSlim(4);
+                var tasks = teamIdsToRefresh.Select(async teamId =>
+                {
+                    await semaphore.WaitAsync(cancellationToken);
+                    try
+                    {
+                        return await service.GetMatchesAsync(teamId, cancellationToken);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                });
+
+                feeds = (await Task.WhenAll(tasks))
+                    .Where(x => x != null)
+                    .Cast<NesineTeamMatchFeed>()
+                    .ToList();
+            }
+
+            if (feeds.Count > 0)
+            {
+                var saveResult = await repository.SaveFeedsAsync(
+                    currentRound,
+                    matchOrderByTeamId,
+                    feeds,
+                    cancellationToken);
+
+                Log(
+                    $"Nesine takim mac gecmisi guncellendi | Kimlik: {matchOrderByTeamId.Count} | Feed: {saveResult.FetchCount} | Mac: {saveResult.MatchUpsertCount} | Tamamlanmis: {saveResult.CompletedMatchCount}",
+                    Color.LightSteelBlue);
+            }
+            else
+            {
+                Log(
+                    $"Nesine takim mac gecmisi cache'den kullaniliyor | Kimlik: {matchOrderByTeamId.Count}",
+                    Color.LightSteelBlue);
+            }
+
+            var quality = await repository.GetDataQualityAsync(cancellationToken);
+            Log(
+                $"Nesine veri kapsami | Takim: {quality.TeamCount} | Lig: {quality.CompetitionCount} | Mac: {quality.MatchCount} | Skorlu: {quality.CompletedMatchCount}",
+                quality.CompletedMatchCount > 0 ? Color.LightSteelBlue : Color.Orange);
+
+            await TryRefreshNesineTeamProfilesAsync(
+                currentRound,
+                matchOrderByTeamId,
+                cancellationToken);
+
+            var teamModel = await new TeamModelEnsembleService(repository)
+                .BuildAsync(currentRound, resolvedMatches, cancellationToken);
+            _teamModelEnsemble = teamModel;
+            _teamModelPredictionsByMatchNo = teamModel.Predictions;
+            var comparison = teamModel.Comparison;
+            if (comparison.EvaluatedMatches > 0)
+            {
+                Log(
+                    $"Elo walk-forward | Ortak ornek: {comparison.EvaluatedMatches}/{comparison.TotalCompletedMatches} | Brier: {comparison.Elo.BrierScore:F4} | LogLoss: {comparison.Elo.LogLoss:F4} | RPS: {comparison.Elo.RankedProbabilityScore:F4} | Isabet: %{comparison.Elo.Accuracy * 100:F1}",
+                    Color.LightSteelBlue);
+                Log(
+                    $"Dixon-Coles walk-forward | Brier: {comparison.DixonColes.BrierScore:F4} | LogLoss: {comparison.DixonColes.LogLoss:F4} | RPS: {comparison.DixonColes.RankedProbabilityScore:F4} | Isabet: %{comparison.DixonColes.Accuracy * 100:F1} | Rho: {comparison.DixonColesRho:F2}",
+                    Color.LightSteelBlue);
+                Log(
+                    $"Ortak ornek LogLoss karsilastirmasi | Daha iyi: {comparison.BetterLogLossModel}",
+                    Color.LightSteelBlue);
+
+                if (comparison.Ensemble.Count > 0)
+                {
+                    Log(
+                        $"Kalibre ensemble walk-forward | Ornek: {comparison.Ensemble.Count} | Brier: {comparison.Ensemble.BrierScore:F4} | LogLoss: {comparison.Ensemble.LogLoss:F4} | RPS: {comparison.Ensemble.RankedProbabilityScore:F4} | Isabet: %{comparison.Ensemble.Accuracy * 100:F1}",
+                        Color.LightSteelBlue);
+                }
+
+                var settings = comparison.EnsembleSettings;
+                Log(
+                    $"Ensemble ayarlari | Kalibrasyon: {settings.CalibrationSampleCount} | Elo sicaklik: {settings.EloTemperature:F2} | Dixon-Coles sicaklik: {settings.DixonColesTemperature:F2} | Agirlik Elo/DC: %{settings.EloWeight * 100:F0}/%{settings.DixonColesWeight * 100:F0} | Guncel mac: {_teamModelPredictionsByMatchNo.Count}",
+                    settings.IsCalibrated ? Color.LightSteelBlue : Color.Orange);
+            }
+            else
+            {
+                Log(
+                    $"Elo/Dixon-Coles karsilastirmasi icin takim basi en az 3 onceki mac bekleniyor | Skorlu veri: {comparison.TotalCompletedMatches}",
+                    Color.Orange);
+            }
+        }
+
+        private async Task TryRefreshNesineTeamProfilesAsync(
+            CurrentRoundInfo currentRound,
+            IReadOnlyDictionary<int, int> matchOrderByTeamId,
+            CancellationToken cancellationToken)
+        {
+            var repository = new NesineTeamProfileRepository();
+            var teamIdsToRefresh = await repository.GetTeamIdsNeedingRefreshAsync(
+                matchOrderByTeamId.Keys,
+                TimeSpan.FromHours(6),
+                cancellationToken);
+
+            var profiles = new List<NesineTeamProfileFeed>();
+            if (teamIdsToRefresh.Count > 0)
+            {
+                var service = new NesineTeamProfileService();
+                using var semaphore = new SemaphoreSlim(4);
+                var tasks = teamIdsToRefresh.Select(async teamId =>
+                {
+                    await semaphore.WaitAsync(cancellationToken);
+                    try
+                    {
+                        return await service.GetProfileAsync(teamId, cancellationToken);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                });
+
+                profiles = (await Task.WhenAll(tasks))
+                    .Where(x => x.Lineup != null || x.LeagueTable != null)
+                    .ToList();
+            }
+
+            if (profiles.Count > 0)
+            {
+                var saveResult = await repository.SaveProfilesAsync(
+                    currentRound,
+                    matchOrderByTeamId,
+                    profiles,
+                    cancellationToken);
+
+                Log(
+                    $"Nesine takim profil verisi guncellendi | Takim: {profiles.Count} | Kadro: {saveResult.LineupSnapshotCount} snapshot/{saveResult.PlayerRowCount} oyuncu | Puan tablosu: {saveResult.LeagueSnapshotCount} snapshot/{saveResult.LeagueRowCount} satir",
+                    Color.LightSteelBlue);
+            }
+            else
+            {
+                Log(
+                    $"Nesine kadro ve puan tablosu cache'den kullaniliyor | Takim: {matchOrderByTeamId.Count}",
+                    Color.LightSteelBlue);
+            }
+
+            _nesineTeamContextByTeamId = await repository.LoadLatestFeaturesAsync(
+                matchOrderByTeamId.Keys,
+                cancellationToken);
+
+            var lineupCoverage = _nesineTeamContextByTeamId.Values.Count(x => x.SquadSize > 0);
+            var tableCoverage = _nesineTeamContextByTeamId.Values.Count(x => x.Position.HasValue);
+            Log(
+                $"Takim context feature kapsami | Kadro: {lineupCoverage}/{matchOrderByTeamId.Count} | Puan durumu: {tableCoverage}/{matchOrderByTeamId.Count}",
+                lineupCoverage > 0 || tableCoverage > 0 ? Color.LightSteelBlue : Color.Orange);
         }
 
         private async Task<IReadOnlyDictionary<int, MatchModelFeature>?> TryBuildMatchModelFeaturesAsync(
@@ -749,13 +984,88 @@ namespace SporTotoFormApp
                     currentRound,
                     nesineProgram?.Matches,
                     headToHeadByMatchNo,
-                    featuresByMatchNo);
+                    featuresByMatchNo,
+                    _teamModelPredictionsByMatchNo);
             }
             catch (Exception ex)
             {
                 Log($"DB tahmin modeli okunamadi: {ex.Message}", Color.OrangeRed);
                 return null;
             }
+        }
+
+        private async Task RefreshExperimentPredictionModelAsync(
+            CurrentRoundInfo currentRound,
+            CancellationToken cancellationToken,
+            string reason)
+        {
+            try
+            {
+                if (_nesineProgram != null &&
+                    _nesineHeadToHeadByMatchNo != null &&
+                    _nesineHeadToHeadExtrasByMatchNo != null)
+                {
+                    await TryRefreshNesineTeamMatchesAsync(
+                        currentRound,
+                        _nesineProgram,
+                        _nesineHeadToHeadByMatchNo,
+                        _nesineHeadToHeadExtrasByMatchNo,
+                        cancellationToken);
+                }
+                else if (_resolvedNesineMatches?.Count > 0)
+                {
+                    var teamModel = await new TeamModelEnsembleService()
+                        .BuildAsync(
+                            currentRound,
+                            _resolvedNesineMatches,
+                            cancellationToken);
+                    _teamModelEnsemble = teamModel;
+                    _teamModelPredictionsByMatchNo = teamModel.Predictions;
+                }
+                else
+                {
+                    Log(
+                        "Deney modu takim modeli yenilenemedi: Nesine takim kimlikleri hazir degil.",
+                        Color.Orange);
+                }
+
+                _predictionInsight = TryBuildPredictionInsight(
+                    currentRound,
+                    _nesineProgram,
+                    _nesineHeadToHeadByMatchNo,
+                    _matchModelFeaturesByMatchNo);
+                _experimentModelRefreshedAtUtc = DateTime.UtcNow;
+
+                Log(
+                    $"Deney modu modeli yenilendi ({reason}) | {FormatTeamModelForLog()}",
+                    _teamModelPredictionsByMatchNo?.Count > 0
+                        ? Color.LightSteelBlue
+                        : Color.Orange);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log(
+                    $"Deney modu model yenileme hatasi ({reason}): {ex.Message}",
+                    Color.OrangeRed);
+            }
+        }
+
+        private string FormatTeamModelForLog()
+        {
+            var settings = _teamModelEnsemble?.Comparison.EnsembleSettings;
+            if (settings == null || !settings.IsCalibrated)
+            {
+                return "Ensemble: pasif";
+            }
+
+            return
+                $"Ensemble: aktif | Kalibrasyon:{settings.CalibrationSampleCount} | " +
+                $"Elo/DC:%{settings.EloWeight * 100:F0}/%{settings.DixonColesWeight * 100:F0} | " +
+                $"Mac:{_teamModelPredictionsByMatchNo?.Count ?? 0}";
         }
 
         private void UpdateCurrentMatchMatrix(List<Coupon> coupons)
@@ -1027,7 +1337,7 @@ namespace SporTotoFormApp
             };
 
             _profiles.Clear();
-            _profiles.Add(CreateProfileTab("DB Model", 30, 1, 20, DurationPresets[0]));
+            _profiles.Add(CreateProfileTab("DB Model", 1024, 1, 20));
 
             Controls.Add(_profileTabs);
         }
@@ -1036,8 +1346,7 @@ namespace SporTotoFormApp
             string profileName,
             int defaultCouponCount,
             int defaultI15Min,
-            int defaultI15Max,
-            RunDurationPreset defaultPreset)
+            int defaultI15Max)
         {
             var page = new TabPage(profileName);
 
@@ -1047,44 +1356,22 @@ namespace SporTotoFormApp
                 "Bu profilden kac kolon uretilecegini belirler.",
                 defaultCouponCount,
                 0,
-                200,
+                2500,
                 18);
 
             couponCount.ValueChanged += (_, _) => UpdateTotalCouponCount();
 
-            var durationLabel = new Label
-            {
-                Text = "Calisma Suresi",
-                Location = new Point(12, 52),
-                Size = new Size(175, 20)
-            };
-
-            var durationPreset = new ComboBox
-            {
-                Location = new Point(190, 48),
-                Size = new Size(130, 23),
-                DropDownStyle = ComboBoxStyle.DropDownList
-            };
-            durationPreset.Items.AddRange(DurationPresets);
-            durationPreset.SelectedItem = defaultPreset;
-
-            _toolTip.SetToolTip(durationLabel, "Ortalama calisma suresine gore arama derinligi ayarlarini otomatik doldurur.");
-            _toolTip.SetToolTip(durationPreset, "Secim degisince TopK, havuz, API butcesi ve Monte Carlo ayarlari guncellenir.");
-
-            page.Controls.Add(durationLabel);
-            page.Controls.Add(durationPreset);
-
             var apiGroup = new GroupBox
             {
                 Text = "API Filtre Ayarlari",
-                Location = new Point(6, 86),
+                Location = new Point(6, 52),
                 Size = new Size(336, 96)
             };
 
             var i15Min = AddNumericInput(
                 apiGroup,
                 "i15 Min",
-                "API donusunde 15 bilen kisi sayisi bu degerin altindaysa kupon elenir.",
+                "Ikramiye paylasim riskini raporlamak icin kullanilan hedef araligin alt siniri.",
                 defaultI15Min,
                 0,
                 100000,
@@ -1093,7 +1380,7 @@ namespace SporTotoFormApp
             var i15Max = AddNumericInput(
                 apiGroup,
                 "i15 Max",
-                "API donusunde 15 bilen kisi sayisi bu degerin ustundeyse kupon elenir.",
+                "Ikramiye paylasim riskini raporlamak icin kullanilan hedef araligin ust siniri.",
                 defaultI15Max,
                 0,
                 100000,
@@ -1102,7 +1389,7 @@ namespace SporTotoFormApp
             var optimizationGroup = new GroupBox
             {
                 Text = "OptimizationOptions",
-                Location = new Point(6, 188),
+                Location = new Point(6, 154),
                 Size = new Size(336, 258)
             };
 
@@ -1110,8 +1397,8 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "InitialTopCandidateLimit",
                 "On skorlama sonrasi tutulacak maksimum aday kupon sayisi (Top-K).",
-                defaultPreset.InitialTopCandidateLimit,
-                1000,
+                3200000,
+                2000,
                 5000000,
                 24);
 
@@ -1119,8 +1406,8 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "DiversePrePoolLimit",
                 "Cesitlilik filtresi sonrasi API'ye gitmeden once tutulacak aday havuzu limiti.",
-                defaultPreset.DiversePrePoolLimit,
-                1000,
+                750000,
+                2000,
                 5000000,
                 58);
 
@@ -1128,7 +1415,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "ApiBudgetMultiplier",
                 "API'de degerlendirilecek kupon butcesi = hedef kolon * bu carpim.",
-                defaultPreset.ApiBudgetMultiplier,
+                1000,
                 1,
                 100000,
                 92);
@@ -1137,7 +1424,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "ApiConcurrency",
                 "Ayni anda kac API cagrisi yapilacagini belirler.",
-                defaultPreset.ApiConcurrency,
+                6,
                 1,
                 128,
                 126);
@@ -1146,7 +1433,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MinHammingDistance",
                 "On havuzda iki kupon arasindaki minimum fark (karakter bazli mesafe).",
-                defaultPreset.MinHammingDistance,
+                3,
                 1,
                 15,
                 160);
@@ -1155,7 +1442,7 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MinHammingDistanceFinal",
                 "Final secimde iki kupon arasindaki minimum fark.",
-                defaultPreset.MinHammingDistanceFinal,
+                3,
                 1,
                 15,
                 194);
@@ -1164,26 +1451,10 @@ namespace SporTotoFormApp
                 optimizationGroup,
                 "MonteCarloScenarioCount",
                 "Portfoy optimizasyonunda simulasyon icin uretilecek senaryo sayisi.",
-                defaultPreset.MonteCarloScenarioCount,
+                400000,
                 500,
                 5000000,
                 228);
-
-            durationPreset.SelectedIndexChanged += (_, _) =>
-            {
-                if (durationPreset.SelectedItem is RunDurationPreset preset)
-                {
-                    ApplyDurationPreset(
-                        preset,
-                        initialTopLimit,
-                        diversePrePool,
-                        apiBudgetMultiplier,
-                        apiConcurrency,
-                        minDistance,
-                        minDistanceFinal,
-                        monteCarlo);
-                }
-            };
 
             page.Controls.Add(apiGroup);
             page.Controls.Add(optimizationGroup);
@@ -1194,7 +1465,6 @@ namespace SporTotoFormApp
                 couponCount,
                 i15Min,
                 i15Max,
-                durationPreset,
                 initialTopLimit,
                 diversePrePool,
                 apiBudgetMultiplier,
@@ -1202,30 +1472,6 @@ namespace SporTotoFormApp
                 minDistance,
                 minDistanceFinal,
                 monteCarlo);
-        }
-
-        private static void ApplyDurationPreset(
-            RunDurationPreset preset,
-            NumericUpDown initialTopLimit,
-            NumericUpDown diversePrePool,
-            NumericUpDown apiBudgetMultiplier,
-            NumericUpDown apiConcurrency,
-            NumericUpDown minDistance,
-            NumericUpDown minDistanceFinal,
-            NumericUpDown monteCarlo)
-        {
-            initialTopLimit.Value = ClampDecimal(preset.InitialTopCandidateLimit, initialTopLimit.Minimum, initialTopLimit.Maximum);
-            diversePrePool.Value = ClampDecimal(preset.DiversePrePoolLimit, diversePrePool.Minimum, diversePrePool.Maximum);
-            apiBudgetMultiplier.Value = ClampDecimal(preset.ApiBudgetMultiplier, apiBudgetMultiplier.Minimum, apiBudgetMultiplier.Maximum);
-            apiConcurrency.Value = ClampDecimal(preset.ApiConcurrency, apiConcurrency.Minimum, apiConcurrency.Maximum);
-            minDistance.Value = ClampDecimal(preset.MinHammingDistance, minDistance.Minimum, minDistance.Maximum);
-            minDistanceFinal.Value = ClampDecimal(preset.MinHammingDistanceFinal, minDistanceFinal.Minimum, minDistanceFinal.Maximum);
-            monteCarlo.Value = ClampDecimal(preset.MonteCarloScenarioCount, monteCarlo.Minimum, monteCarlo.Maximum);
-        }
-
-        private static decimal ClampDecimal(int value, decimal minimum, decimal maximum)
-        {
-            return Math.Clamp((decimal)value, minimum, maximum);
         }
 
         private NumericUpDown AddNumericInput(
@@ -1412,6 +1658,13 @@ namespace SporTotoFormApp
                 _nesineProgram != null,
                 _nesineHeadToHeadByMatchNo?.Count > 0,
                 _matchModelFeaturesByMatchNo?.Count > 0,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.IsCalibrated == true,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.CalibrationSampleCount ?? 0,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.EloWeight,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.DixonColesWeight,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.EloTemperature,
+                _teamModelEnsemble?.Comparison.EnsembleSettings.DixonColesTemperature,
+                _teamModelPredictionsByMatchNo?.Count ?? 0,
                 options);
         }
 
@@ -1515,7 +1768,6 @@ namespace SporTotoFormApp
             NumericUpDown CouponCount,
             NumericUpDown I15Min,
             NumericUpDown I15Max,
-            ComboBox DurationPreset,
             NumericUpDown InitialTopCandidateLimit,
             NumericUpDown DiversePrePoolLimit,
             NumericUpDown ApiBudgetMultiplier,
@@ -1523,42 +1775,5 @@ namespace SporTotoFormApp
             NumericUpDown MinHammingDistance,
             NumericUpDown MinHammingDistanceFinal,
             NumericUpDown MonteCarloScenarioCount);
-
-        private sealed class RunDurationPreset
-        {
-            public RunDurationPreset(
-                string label,
-                int initialTopCandidateLimit,
-                int diversePrePoolLimit,
-                int apiBudgetMultiplier,
-                int apiConcurrency,
-                int minHammingDistance,
-                int minHammingDistanceFinal,
-                int monteCarloScenarioCount)
-            {
-                Label = label;
-                InitialTopCandidateLimit = initialTopCandidateLimit;
-                DiversePrePoolLimit = diversePrePoolLimit;
-                ApiBudgetMultiplier = apiBudgetMultiplier;
-                ApiConcurrency = apiConcurrency;
-                MinHammingDistance = minHammingDistance;
-                MinHammingDistanceFinal = minHammingDistanceFinal;
-                MonteCarloScenarioCount = monteCarloScenarioCount;
-            }
-
-            public string Label { get; }
-            public int InitialTopCandidateLimit { get; }
-            public int DiversePrePoolLimit { get; }
-            public int ApiBudgetMultiplier { get; }
-            public int ApiConcurrency { get; }
-            public int MinHammingDistance { get; }
-            public int MinHammingDistanceFinal { get; }
-            public int MonteCarloScenarioCount { get; }
-
-            public override string ToString()
-            {
-                return Label;
-            }
-        }
     }
 }

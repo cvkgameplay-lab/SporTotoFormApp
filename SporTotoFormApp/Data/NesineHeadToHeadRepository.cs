@@ -61,7 +61,10 @@ namespace SporTotoFormApp.Data
                              @HomeOdd, @DrawOdd, @AwayOdd,
                              @HomeMissingPlayerCount, @AwayMissingPlayerCount,
                              @RawJson);
+                        SELECT 1;
                     END
+                    ELSE
+                        SELECT 0;
                     """,
                     connection);
 
@@ -81,7 +84,8 @@ namespace SporTotoFormApp.Data
                 command.Parameters.AddWithValue("@AwayMissingPlayerCount", summary.AwayMissingPlayerCount);
                 command.Parameters.AddWithValue("@RawJson", summary.RawJson);
 
-                inserted += await command.ExecuteNonQueryAsync(cancellationToken);
+                inserted += Convert.ToInt32(
+                    await command.ExecuteScalarAsync(cancellationToken) ?? 0);
 
                 if (extraSnapshotsByMatchNo != null &&
                     extraSnapshotsByMatchNo.TryGetValue(match.MatchNo, out var extras))
@@ -128,7 +132,10 @@ namespace SporTotoFormApp.Data
                             (@RoundId, @RoundName, @MatchOrder, @BahisKod,
                              @HomeTeamName, @AwayTeamName,
                              @EndpointName, @ApiVersion, @StatusCode, @HasData, @RawJson);
+                        SELECT 1;
                     END
+                    ELSE
+                        SELECT 0;
                     """,
                     connection);
 
@@ -144,7 +151,8 @@ namespace SporTotoFormApp.Data
                 command.Parameters.AddWithValue("@HasData", snapshot.HasData);
                 command.Parameters.AddWithValue("@RawJson", (object?)snapshot.RawJson ?? DBNull.Value);
 
-                inserted += await command.ExecuteNonQueryAsync(cancellationToken);
+                inserted += Convert.ToInt32(
+                    await command.ExecuteScalarAsync(cancellationToken) ?? 0);
             }
 
             return inserted;

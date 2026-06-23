@@ -84,12 +84,12 @@ namespace SporTotoFormApp.Services
         public static PredictionGenerationRules Default => new();
 
         public int MatchCount { get; init; } = 15;
-        public int MaxConsecutiveSame { get; init; } = 3;
-        public int MinOne { get; init; } = 5;
-        public int MaxOne { get; init; } = 9;
-        public int MinDraw { get; init; } = 2;
-        public int MaxDraw { get; init; } = 6;
-        public int MinTwo { get; init; } = 2;
-        public int MaxTwo { get; init; } = 6;
+        public int MaxConsecutiveSame { get; init; } = 6;
+        public int MinOne { get; init; } = 3;
+        public int MaxOne { get; init; } = 11;
+        public int MinDraw { get; init; } = 0;
+        public int MaxDraw { get; init; } = 9;
+        public int MinTwo { get; init; } = 0;
+        public int MaxTwo { get; init; } = 9;
     }
 }

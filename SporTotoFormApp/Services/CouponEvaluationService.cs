@@ -26,7 +26,7 @@ namespace SporTotoFormApp.Services
             {
                 var symbol = prediction[i];
                 var p = _model.GetForPosition(i);
-                var probability = Math.Max(p.ForSymbol(symbol), 1e-6);
+                var probability = Math.Max(RegularizeProbability(p.ForSymbol(symbol)), 1e-6);
                 logLikelihood += Math.Log(probability);
                 expected1 += p.One;
                 expectedX += p.Draw;
@@ -47,11 +47,11 @@ namespace SporTotoFormApp.Services
 
             // Keep a slight rarity preference, but avoid ultra-random picks.
             var structurePenalty = 0.0;
-            structurePenalty += Math.Pow(c1 - expected1, 2) * 0.08;
-            structurePenalty += Math.Pow(cX - expectedX, 2) * 0.07;
-            structurePenalty += Math.Pow(c2 - expected2, 2) * 0.07;
-            structurePenalty += transitions < 6 ? (6 - transitions) * 0.20 : 0.0;
-            structurePenalty += transitions > 13 ? (transitions - 13) * 0.15 : 0.0;
+            structurePenalty += Math.Pow(c1 - expected1, 2) * 0.035;
+            structurePenalty += Math.Pow(cX - expectedX, 2) * 0.030;
+            structurePenalty += Math.Pow(c2 - expected2, 2) * 0.030;
+            structurePenalty += transitions < 4 ? (4 - transitions) * 0.12 : 0.0;
+            structurePenalty += transitions > 14 ? (transitions - 14) * 0.10 : 0.0;
 
             return logLikelihood - structurePenalty;
         }
@@ -61,7 +61,9 @@ namespace SporTotoFormApp.Services
             var hitProbs = new double[prediction.Length];
             for (var i = 0; i < prediction.Length; i++)
             {
-                hitProbs[i] = Math.Max(_model.GetForPosition(i).ForSymbol(prediction[i]), 1e-6);
+                hitProbs[i] = Math.Max(
+                    RegularizeProbability(_model.GetForPosition(i).ForSymbol(prediction[i])),
+                    1e-6);
             }
 
             var distribution = CorrectCountDistribution(hitProbs);
@@ -70,18 +72,9 @@ namespace SporTotoFormApp.Services
             var p14 = distribution[14];
             var p13 = distribution[13];
 
-            var k15 = ParsePositiveInt(bonus.i15);
-            var k14 = ParsePositiveInt(bonus.i14);
-            var k13 = ParsePositiveInt(bonus.i13);
-
-            // Accuracy is the primary objective. Winner counts only apply a mild
-            // split-risk penalty after the model probability has been calculated.
-            var hitValue = p15 + (0.035 * p14) + (0.003 * p13);
-            var splitPenalty = 1.0
-                             + (0.025 * Math.Log(1.0 + k15))
-                             + (0.005 * Math.Log(1.0 + k14))
-                             + (0.002 * Math.Log(1.0 + k13));
-            var utility = hitValue / splitPenalty;
+            // The objective is exact accuracy. Estimated winner counts describe
+            // prize sharing, not the probability that this prediction is correct.
+            var utility = p15 + (0.040 * p14) + (0.004 * p13);
 
             return new CouponAnalysis
             {
@@ -112,21 +105,15 @@ namespace SporTotoFormApp.Services
             return dp;
         }
 
-        private static int ParsePositiveInt(string? raw)
+        private static double RegularizeProbability(double probability)
         {
-            if (string.IsNullOrWhiteSpace(raw))
-            {
-                return 0;
-            }
-
-            var cleaned = new string(raw.Where(char.IsDigit).ToArray());
-            if (int.TryParse(cleaned, out var value) && value >= 0)
-            {
-                return value;
-            }
-
-            return 0;
+            const double uniformBlend = 0.08;
+            return Math.Clamp(
+                (probability * (1.0 - uniformBlend)) + ((1.0 / 3.0) * uniformBlend),
+                0.03,
+                0.94);
         }
+
     }
 
     public sealed class CouponAnalysis

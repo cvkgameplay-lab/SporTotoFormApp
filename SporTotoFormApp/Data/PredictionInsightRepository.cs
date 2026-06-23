@@ -9,7 +9,8 @@ namespace SporTotoFormApp.Data
             CurrentRoundInfo currentRound,
             IReadOnlyDictionary<int, NesineMatchPopularity>? nesinePopularityByMatchNo = null,
             IReadOnlyDictionary<int, NesineHeadToHeadSummary>? nesineHeadToHeadByMatchNo = null,
-            IReadOnlyDictionary<int, MatchModelFeature>? matchModelFeaturesByMatchNo = null)
+            IReadOnlyDictionary<int, MatchModelFeature>? matchModelFeaturesByMatchNo = null,
+            IReadOnlyDictionary<int, TeamModelPrediction>? teamModelPredictionsByMatchNo = null)
         {
             var probabilities = new List<SymbolProbabilities>(currentRound.Matches.Count);
             var rows = new List<MatchInsight>(currentRound.Matches.Count);
@@ -31,8 +32,21 @@ namespace SporTotoFormApp.Data
                     matchModelFeaturesByMatchNo.TryGetValue(match.MatchOrder, out var foundFeature)
                         ? foundFeature
                         : null;
+                var teamModelPrediction = teamModelPredictionsByMatchNo != null &&
+                    teamModelPredictionsByMatchNo.TryGetValue(
+                        match.MatchOrder,
+                        out var foundTeamModelPrediction)
+                        ? foundTeamModelPrediction
+                        : null;
 
-                var stats = LoadMatchStats(connection, match.HomeTeamName, match.AwayTeamName, nesinePopularity, headToHead, feature);
+                var stats = LoadMatchStats(
+                    connection,
+                    match.HomeTeamName,
+                    match.AwayTeamName,
+                    nesinePopularity,
+                    headToHead,
+                    feature,
+                    teamModelPrediction);
                 probabilities.Add(stats.Probabilities);
                 rows.Add(new MatchInsight(
                     match.MatchOrder,
@@ -55,7 +69,8 @@ namespace SporTotoFormApp.Data
             string awayTeamName,
             NesineMatchPopularity? nesinePopularity,
             NesineHeadToHeadSummary? headToHead,
-            MatchModelFeature? feature)
+            MatchModelFeature? feature,
+            TeamModelPrediction? teamModelPrediction)
         {
             var count1 = 2.5;
             var countX = 1.5;
@@ -190,9 +205,28 @@ namespace SporTotoFormApp.Data
             var rawCountX = components.Sum(x => x.CountX);
             var rawCount2 = components.Sum(x => x.Count2);
             var sampleSize = components.Sum(x => x.SampleSize);
+            var probabilities = SymbolProbabilities.FromCounts(
+                count1,
+                countX,
+                count2);
+
+            if (teamModelPrediction != null)
+            {
+                probabilities = SymbolProbabilities.Blend(
+                    probabilities,
+                    teamModelPrediction.Probabilities,
+                    teamModelPrediction.HistoricalModelBlendWeight);
+                components.Add(new MatchInsightComponent(
+                    $"Elo + Dixon-Coles ensemble (n={teamModelPrediction.CalibrationSampleCount}, xG={teamModelPrediction.ExpectedHomeGoals:F2}-{teamModelPrediction.ExpectedAwayGoals:F2})",
+                    100,
+                    (int)Math.Round(teamModelPrediction.Probabilities.One * 100),
+                    (int)Math.Round(teamModelPrediction.Probabilities.Draw * 100),
+                    (int)Math.Round(teamModelPrediction.Probabilities.Two * 100),
+                    teamModelPrediction.HistoricalModelBlendWeight));
+            }
 
             return new MatchStats(
-                SymbolProbabilities.FromCounts(count1, countX, count2),
+                probabilities,
                 sampleSize,
                 rawCount1,
                 rawCountX,

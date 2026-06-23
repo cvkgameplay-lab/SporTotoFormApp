@@ -40,7 +40,10 @@ namespace SporTotoFormApp.Data
                             (@RoundId, @RoundName, @ProgramNo, @NesineWeek, @ProgramEndDate,
                              @MatchOrder, @HomeTeamName, @AwayTeamName,
                              @Percentage1, @PercentageX, @Percentage2);
+                        SELECT 1;
                     END
+                    ELSE
+                        SELECT 0;
                     """,
                     connection);
 
@@ -56,7 +59,8 @@ namespace SporTotoFormApp.Data
                 command.Parameters.AddWithValue("@PercentageX", match.PercentageX);
                 command.Parameters.AddWithValue("@Percentage2", match.Percentage2);
 
-                inserted += await command.ExecuteNonQueryAsync(cancellationToken);
+                inserted += Convert.ToInt32(
+                    await command.ExecuteScalarAsync(cancellationToken) ?? 0);
             }
 
             return inserted;
