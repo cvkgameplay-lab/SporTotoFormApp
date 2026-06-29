@@ -151,6 +151,79 @@ namespace SporTotoFormApp.Data
             return result;
         }
 
+        public async Task<int> GetExperimentRunCountAsync(
+            int roundId,
+            CancellationToken cancellationToken = default)
+        {
+            await EnsureSchemaAsync(cancellationToken);
+
+            await using var connection = Database.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new SqlCommand(
+                """
+                SELECT COUNT(1)
+                FROM dbo.PredictionRuns r
+                INNER JOIN dbo.PredictionRunModelInfo info ON info.RunId = r.Id
+                WHERE info.RoundId = @RoundId
+                  AND r.Notes LIKE 'Experiment run #%'
+                  AND r.Notes LIKE '%UcuncuEsik:%'
+                  AND r.Notes LIKE '%Yumusatma:%';
+                """,
+                connection);
+            command.Parameters.AddWithValue("@RoundId", roundId);
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            return Convert.ToInt32(result);
+        }
+
+        public async Task<PredictionRunExperimentConfiguration?> GetExperimentConfigurationAsync(
+            int runId,
+            CancellationToken cancellationToken = default)
+        {
+            await EnsureSchemaAsync(cancellationToken);
+
+            await using var connection = Database.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new SqlCommand(
+                """
+                SELECT
+                    r.TotalRequested,
+                    info.ThirdChoiceMinRatio,
+                    info.ProbabilityUniformBlend,
+                    info.PatternScoreWeight,
+                    info.WinnerPatternWeight,
+                    info.RecentPatternWeight,
+                    info.PreviousWeekPatternWeight,
+                    info.SurpriseBalanceWeight,
+                    info.MinHammingDistance,
+                    info.MinHammingDistanceFinal,
+                    info.MonteCarloScenarioCount
+                FROM dbo.PredictionRuns r
+                INNER JOIN dbo.PredictionRunModelInfo info ON info.RunId = r.Id
+                WHERE r.Id = @RunId;
+                """,
+                connection);
+            command.Parameters.AddWithValue("@RunId", runId);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return new PredictionRunExperimentConfiguration(
+                reader.GetInt32(0),
+                reader.GetDouble(1),
+                reader.GetDouble(2),
+                reader.GetDouble(3),
+                reader.GetDouble(4),
+                reader.GetDouble(5),
+                reader.GetDouble(6),
+                reader.GetDouble(7),
+                reader.GetInt32(8),
+                reader.GetInt32(9),
+                reader.GetInt32(10));
+        }
+
         private static async Task<ResolvedActualResult?> TryResolveActualResultAsync(
             SqlConnection connection,
             PendingPredictionRun pending,
@@ -324,6 +397,13 @@ namespace SporTotoFormApp.Data
                         MinHammingDistance INT NOT NULL,
                         MinHammingDistanceFinal INT NOT NULL,
                         MonteCarloScenarioCount INT NOT NULL,
+                        ThirdChoiceMinRatio FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_ThirdChoiceRatio DEFAULT 1.01,
+                        ProbabilityUniformBlend FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_UniformBlend DEFAULT 0,
+                        PatternScoreWeight FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_PatternScoreWeight DEFAULT 0,
+                        WinnerPatternWeight FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_WinnerPatternWeight DEFAULT 0,
+                        RecentPatternWeight FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_RecentPatternWeight DEFAULT 0,
+                        PreviousWeekPatternWeight FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_PreviousWeekPatternWeight DEFAULT 0,
+                        SurpriseBalanceWeight FLOAT NOT NULL CONSTRAINT DF_PredictionRunModelInfo_SurpriseBalanceWeight DEFAULT 0,
                         CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_PredictionRunModelInfo_CreatedAt DEFAULT SYSDATETIME(),
                         CONSTRAINT FK_PredictionRunModelInfo_PredictionRuns FOREIGN KEY (RunId) REFERENCES dbo.PredictionRuns(Id)
                     );
@@ -355,6 +435,41 @@ namespace SporTotoFormApp.Data
                     ALTER TABLE dbo.PredictionRunModelInfo
                     ADD EnsembleMatchCount INT NOT NULL
                         CONSTRAINT DF_PredictionRunModelInfo_EnsembleMatchCount DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'ThirdChoiceMinRatio') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD ThirdChoiceMinRatio FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_ThirdChoiceRatio DEFAULT 1.01 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'ProbabilityUniformBlend') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD ProbabilityUniformBlend FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_UniformBlend DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'PatternScoreWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD PatternScoreWeight FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_PatternScoreWeight DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'WinnerPatternWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD WinnerPatternWeight FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_WinnerPatternWeight DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'RecentPatternWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD RecentPatternWeight FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_RecentPatternWeight DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'PreviousWeekPatternWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD PreviousWeekPatternWeight FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_PreviousWeekPatternWeight DEFAULT 0 WITH VALUES;
+
+                IF COL_LENGTH('dbo.PredictionRunModelInfo', 'SurpriseBalanceWeight') IS NULL
+                    ALTER TABLE dbo.PredictionRunModelInfo
+                    ADD SurpriseBalanceWeight FLOAT NOT NULL
+                        CONSTRAINT DF_PredictionRunModelInfo_SurpriseBalanceWeight DEFAULT 0 WITH VALUES;
 
                 IF OBJECT_ID('dbo.PredictionRunMatchMatrix', 'U') IS NULL
                 BEGIN
@@ -475,8 +590,11 @@ namespace SporTotoFormApp.Data
                      EnsembleDixonColesWeight, EnsembleEloTemperature,
                      EnsembleDixonColesTemperature, EnsembleMatchCount,
                      I15Min, I15Max, InitialTopCandidateLimit, DiversePrePoolLimit,
-                     ApiBudgetMultiplier, ApiConcurrency, MinHammingDistance,
-                     MinHammingDistanceFinal, MonteCarloScenarioCount)
+                      ApiBudgetMultiplier, ApiConcurrency, MinHammingDistance,
+                      MinHammingDistanceFinal, MonteCarloScenarioCount,
+                      ThirdChoiceMinRatio, ProbabilityUniformBlend,
+                      PatternScoreWeight, WinnerPatternWeight, RecentPatternWeight,
+                      PreviousWeekPatternWeight, SurpriseBalanceWeight)
                 VALUES
                     (@RunId, @RoundId, @RoundName, @NesineProgramNo,
                      @UsedNesinePopularity, @UsedHeadToHead, @UsedFeatureModel, @UsedTeamEnsemble,
@@ -484,8 +602,11 @@ namespace SporTotoFormApp.Data
                      @EnsembleDixonColesWeight, @EnsembleEloTemperature,
                      @EnsembleDixonColesTemperature, @EnsembleMatchCount,
                      @I15Min, @I15Max, @InitialTopCandidateLimit, @DiversePrePoolLimit,
-                     @ApiBudgetMultiplier, @ApiConcurrency, @MinHammingDistance,
-                     @MinHammingDistanceFinal, @MonteCarloScenarioCount);
+                      @ApiBudgetMultiplier, @ApiConcurrency, @MinHammingDistance,
+                      @MinHammingDistanceFinal, @MonteCarloScenarioCount,
+                      @ThirdChoiceMinRatio, @ProbabilityUniformBlend,
+                      @PatternScoreWeight, @WinnerPatternWeight, @RecentPatternWeight,
+                      @PreviousWeekPatternWeight, @SurpriseBalanceWeight);
                 """,
                 connection,
                 transaction);
@@ -523,6 +644,13 @@ namespace SporTotoFormApp.Data
             command.Parameters.AddWithValue("@MinHammingDistance", context.Options.MinHammingDistance);
             command.Parameters.AddWithValue("@MinHammingDistanceFinal", context.Options.MinHammingDistanceFinal);
             command.Parameters.AddWithValue("@MonteCarloScenarioCount", context.Options.MonteCarloScenarioCount);
+            command.Parameters.AddWithValue("@ThirdChoiceMinRatio", context.Options.ThirdChoiceMinRatio);
+            command.Parameters.AddWithValue("@ProbabilityUniformBlend", context.Options.ProbabilityUniformBlend);
+            command.Parameters.AddWithValue("@PatternScoreWeight", context.Options.PatternScoreWeight);
+            command.Parameters.AddWithValue("@WinnerPatternWeight", context.Options.WinnerPatternWeight);
+            command.Parameters.AddWithValue("@RecentPatternWeight", context.Options.RecentPatternWeight);
+            command.Parameters.AddWithValue("@PreviousWeekPatternWeight", context.Options.PreviousWeekPatternWeight);
+            command.Parameters.AddWithValue("@SurpriseBalanceWeight", context.Options.SurpriseBalanceWeight);
 
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -744,6 +872,19 @@ namespace SporTotoFormApp.Data
         int Hit14Count,
         int Hit13Count,
         int Hit12Count);
+
+    public sealed record PredictionRunExperimentConfiguration(
+        int CouponCount,
+        double ThirdChoiceMinRatio,
+        double ProbabilityUniformBlend,
+        double PatternScoreWeight,
+        double WinnerPatternWeight,
+        double RecentPatternWeight,
+        double PreviousWeekPatternWeight,
+        double SurpriseBalanceWeight,
+        int MinHammingDistance,
+        int MinHammingDistanceFinal,
+        int MonteCarloScenarioCount);
 
     internal sealed record PendingPredictionRun(
         int RunId,

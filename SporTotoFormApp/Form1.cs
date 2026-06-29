@@ -295,6 +295,11 @@ namespace SporTotoFormApp
                 experimentRound,
                 cancellationToken,
                 "baslangic");
+            _experimentRunCounter = await new PredictionRepository()
+                .GetExperimentRunCountAsync(experimentRoundId, cancellationToken);
+            Log(
+                $"Deney aramasi RoundId {experimentRoundId} icin {_experimentRunCounter}. kombinasyondan devam ediyor.",
+                Color.LightSteelBlue);
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -419,48 +424,48 @@ namespace SporTotoFormApp
         {
             var baseRequest = BuildProfileRequests().First();
             var options = baseRequest.Options;
-            var minI15 = Random.Shared.Next(0, 4) == 0
-                ? Math.Max(options.MinI15WinnerCount - 1, 1)
-                : options.MinI15WinnerCount;
-            var maxI15 = Random.Shared.Next(0, 4) == 0
-                ? Math.Min(options.MaxI15WinnerCount + 2, 20)
-                : options.MaxI15WinnerCount;
-            if (minI15 > maxI15)
-            {
-                maxI15 = minI15;
-            }
+            int[] couponCounts = [256, 512, 1024, 1536, 2048, 2500];
+            double[] thirdChoiceRatios = [0.55, 0.45, 0.35, 0.25, 0.15];
+            double[] uniformBlends = [0.04, 0.08, 0.12, 0.16];
+            double[] patternScoreWeights = [0.25, 0.35, 0.50];
+            var combinationCount =
+                couponCounts.Length *
+                thirdChoiceRatios.Length *
+                uniformBlends.Length *
+                patternScoreWeights.Length;
+            var combinationIndex = Math.Max(iteration - 1, 0) % combinationCount;
+            var couponIndex = combinationIndex % couponCounts.Length;
+            combinationIndex /= couponCounts.Length;
+            var ratioIndex = combinationIndex % thirdChoiceRatios.Length;
+            combinationIndex /= thirdChoiceRatios.Length;
+            var blendIndex = combinationIndex % uniformBlends.Length;
+            var patternWeightIndex = combinationIndex / uniformBlends.Length;
+            var desiredCouponCount = couponCounts[couponIndex];
 
             var varied = new OptimizationOptions
             {
-                InitialTopCandidateLimit = VaryInt(options.InitialTopCandidateLimit, 0.90, 1.10, 1000, 5000000),
-                DiversePrePoolLimit = VaryInt(options.DiversePrePoolLimit, 0.85, 1.15, 1000, 5000000),
+                InitialTopCandidateLimit = options.InitialTopCandidateLimit,
+                DiversePrePoolLimit = options.DiversePrePoolLimit,
                 ApiBudgetMultiplier = options.ApiBudgetMultiplier,
                 ApiConcurrency = options.ApiConcurrency,
-                MinHammingDistance = Random.Shared.Next(0, 10) switch
-                {
-                    < 7 => 3,
-                    < 9 => 4,
-                    _ => 2
-                },
-                MinHammingDistanceFinal = Random.Shared.Next(0, 10) switch
-                {
-                    < 7 => 3,
-                    < 9 => 4,
-                    _ => 2
-                },
-                MonteCarloScenarioCount = VaryInt(options.MonteCarloScenarioCount, 0.85, 1.15, 500, 5000000),
-                MinI15WinnerCount = minI15,
-                MaxI15WinnerCount = maxI15
+                MinHammingDistance = 3,
+                MinHammingDistanceFinal = 3,
+                MonteCarloScenarioCount = options.MonteCarloScenarioCount,
+                ThirdChoiceMinRatio = thirdChoiceRatios[ratioIndex],
+                ProbabilityUniformBlend = uniformBlends[blendIndex],
+                PatternScoreWeight = patternScoreWeights[patternWeightIndex],
+                WinnerPatternWeight = options.WinnerPatternWeight,
+                RecentPatternWeight = options.RecentPatternWeight,
+                PreviousWeekPatternWeight = options.PreviousWeekPatternWeight,
+                SurpriseBalanceWeight = options.SurpriseBalanceWeight,
+                MinI15WinnerCount = options.MinI15WinnerCount,
+                MaxI15WinnerCount = options.MaxI15WinnerCount
             };
 
-            return new ProfileRunRequest($"Deney #{iteration}", baseRequest.DesiredCouponCount, varied);
-        }
-
-        private static int VaryInt(int value, double minMultiplier, double maxMultiplier, int minimum, int maximum)
-        {
-            var factor = minMultiplier + Random.Shared.NextDouble() * (maxMultiplier - minMultiplier);
-            var varied = (int)Math.Round(value * factor);
-            return Math.Clamp(varied, minimum, maximum);
+            return new ProfileRunRequest(
+                $"Deney #{iteration}",
+                desiredCouponCount,
+                varied);
         }
 
         private async Task SaveExperimentRunToDatabaseAsync(
@@ -503,7 +508,10 @@ namespace SporTotoFormApp
                 $"ApiCarpan:{options.ApiBudgetMultiplier:n0} | " +
                 $"Esz:{options.ApiConcurrency} | " +
                 $"Dist:{options.MinHammingDistance}/{options.MinHammingDistanceFinal} | " +
-                $"MC:{options.MonteCarloScenarioCount:n0}";
+                $"MC:{options.MonteCarloScenarioCount:n0} | " +
+                $"UcuncuEsik:{options.ThirdChoiceMinRatio:F2} | " +
+                $"Yumusatma:{options.ProbabilityUniformBlend:F2} | " +
+                $"Oruntu:{options.PatternScoreWeight:F2}/Kaz:{options.WinnerPatternWeight:F2}/Son:{options.RecentPatternWeight:F2}/Once:{options.PreviousWeekPatternWeight:F2}/Surp:{options.SurpriseBalanceWeight:F2}";
         }
 
         private async Task<bool> RefreshHistoricalResultsAndEvaluateRunsAsync()
@@ -548,11 +556,24 @@ namespace SporTotoFormApp
                     return historicalRefreshSucceeded;
                 }
 
+                var predictionRepository = new PredictionRepository();
                 foreach (var summary in summaries)
                 {
                     Log(
                         $"Run {summary.RunId} | Round {summary.RoundId} | En iyi: {summary.BestHitCount} | Ort: {summary.AverageHitCount:F2} | 15:{summary.Hit15Count} 14:{summary.Hit14Count} 13:{summary.Hit13Count} 12:{summary.Hit12Count}",
                         summary.BestHitCount >= 13 ? Color.LimeGreen : Color.LightSteelBlue);
+
+                    if (summary.Hit15Count > 0)
+                    {
+                        var configuration = await predictionRepository
+                            .GetExperimentConfigurationAsync(summary.RunId);
+                        if (configuration != null)
+                        {
+                            Log(
+                                $"15/15 BASARILI AYAR | Run:{summary.RunId} | Kolon:{configuration.CouponCount} | UcuncuEsik:{configuration.ThirdChoiceMinRatio:F2} | Yumusatma:{configuration.ProbabilityUniformBlend:F2} | Oruntu:{configuration.PatternScoreWeight:F2}/Kaz:{configuration.WinnerPatternWeight:F2}/Son:{configuration.RecentPatternWeight:F2}/Once:{configuration.PreviousWeekPatternWeight:F2}/Surp:{configuration.SurpriseBalanceWeight:F2} | Dist:{configuration.MinHammingDistance}/{configuration.MinHammingDistanceFinal} | MC:{configuration.MonteCarloScenarioCount:n0}",
+                                Color.LimeGreen);
+                        }
+                    }
                 }
 
                 Log($"Run sonuc degerlendirme tamamlandi: {summaries.Count} run", Color.Yellow);

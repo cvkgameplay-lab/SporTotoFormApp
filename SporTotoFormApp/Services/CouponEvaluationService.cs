@@ -5,10 +5,17 @@ namespace SporTotoFormApp.Services
     public sealed class CouponEvaluationService
     {
         private readonly HistoricalOutcomeModel _model;
+        private readonly WeekPatternModel? _weekPatternModel;
+        private readonly OptimizationOptions _options;
 
-        public CouponEvaluationService(HistoricalOutcomeModel model)
+        public CouponEvaluationService(
+            HistoricalOutcomeModel model,
+            WeekPatternModel? weekPatternModel = null,
+            OptimizationOptions? options = null)
         {
             _model = model;
+            _weekPatternModel = weekPatternModel;
+            _options = options ?? new OptimizationOptions();
         }
 
         public double PreScore(string prediction)
@@ -53,7 +60,12 @@ namespace SporTotoFormApp.Services
             structurePenalty += transitions < 4 ? (4 - transitions) * 0.12 : 0.0;
             structurePenalty += transitions > 14 ? (transitions - 14) * 0.10 : 0.0;
 
-            return logLikelihood - structurePenalty;
+            var patternAdjustment = _weekPatternModel?.GetPreScoreAdjustment(
+                prediction,
+                _model,
+                _options) ?? 0.0;
+
+            return logLikelihood - structurePenalty + patternAdjustment;
         }
 
         public CouponAnalysis Analyze(string prediction, Bonus bonus)
@@ -72,9 +84,15 @@ namespace SporTotoFormApp.Services
             var p14 = distribution[14];
             var p13 = distribution[13];
 
-            // The objective is exact accuracy. Estimated winner counts describe
-            // prize sharing, not the probability that this prediction is correct.
-            var utility = p15 + (0.040 * p14) + (0.004 * p13);
+            // A single-column utility that only chases 15/15 becomes too brittle:
+            // one bad probability can push the whole portfolio away from 14+.
+            // Keep 15/15 as the main objective, but give 14/15 and 13/15 enough
+            // weight so the final portfolio prefers robust near-miss coverage.
+            var utility = p15 + (0.160 * p14) + (0.020 * p13);
+            utility *= _weekPatternModel?.GetUtilityMultiplier(
+                prediction,
+                _model,
+                _options) ?? 1.0;
 
             return new CouponAnalysis
             {

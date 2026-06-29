@@ -94,6 +94,62 @@ namespace SporTotoFormApp.Data
             return lines;
         }
 
+        public List<HistoricalResultPatternRow> GetPatternRows()
+        {
+            var rows = new List<HistoricalResultPatternRow>();
+
+            using var connection = Database.CreateConnection();
+            connection.Open();
+
+            using var command = new SqlCommand(
+                """
+                SELECT
+                    hr.Id,
+                    hr.RoundId,
+                    hr.ResultLine,
+                    hr.SeasonYear,
+                    hr.WeekNumber,
+                    hr.RoundName,
+                    MAX(CASE WHEN p.HitCount = 15 THEN p.WinnerCount END) AS Hit15WinnerCount
+                FROM HistoricalResults hr
+                LEFT JOIN HistoricalResultPayouts p ON p.HistoricalResultId = hr.Id
+                GROUP BY
+                    hr.Id,
+                    hr.RoundId,
+                    hr.ResultLine,
+                    hr.SeasonYear,
+                    hr.WeekNumber,
+                    hr.RoundName
+                ORDER BY
+                    COALESCE(hr.SeasonYear, 0),
+                    COALESCE(hr.WeekNumber, 0),
+                    COALESCE(hr.RoundId, hr.Id),
+                    hr.Id;
+                """,
+                connection);
+            using var reader = command.ExecuteReader();
+
+            while (reader.Read())
+            {
+                var resultLine = NormalizeResultLine(reader.GetString(2));
+                if (resultLine == null)
+                {
+                    continue;
+                }
+
+                rows.Add(new HistoricalResultPatternRow(
+                    reader.GetInt32(0),
+                    reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    resultLine,
+                    reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                    reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+            }
+
+            return rows;
+        }
+
         private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
         {
             await using var connection = Database.CreateConnection();
@@ -528,4 +584,13 @@ namespace SporTotoFormApp.Data
         string? ShortName,
         string? MediumName,
         int? CountryId);
+
+    public sealed record HistoricalResultPatternRow(
+        int Id,
+        int? RoundId,
+        string ResultLine,
+        int? SeasonYear,
+        int? WeekNumber,
+        string? RoundName,
+        int? Hit15WinnerCount);
 }

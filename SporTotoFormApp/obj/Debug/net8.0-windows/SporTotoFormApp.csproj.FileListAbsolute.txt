@@ -137,3 +137,8 @@ C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_verify2\SporTo
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_verify2\SporTotoFormApp.runtimeconfig.json
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_verify2\SporTotoFormApp.dll
 C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_verify2\SporTotoFormApp.pdb
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_experiment_verify\SporTotoFormApp.exe
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_experiment_verify\SporTotoFormApp.deps.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_experiment_verify\SporTotoFormApp.runtimeconfig.json
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_experiment_verify\SporTotoFormApp.dll
+C:\Users\Hüseyin Emre Çevik\source\repos\SporTotoFormApp\_build_experiment_verify\SporTotoFormApp.pdb

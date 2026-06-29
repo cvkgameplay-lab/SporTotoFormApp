@@ -7,12 +7,21 @@ namespace SporTotoFormApp.Services
         private readonly HistoricalOutcomeModel _model;
         private readonly int _scenarioCount;
         private readonly Random _random;
+        private readonly double _thirdChoiceMinRatio;
+        private readonly double _probabilityUniformBlend;
 
-        public MonteCarloPortfolioOptimizer(HistoricalOutcomeModel model, int scenarioCount, int randomSeed = 42)
+        public MonteCarloPortfolioOptimizer(
+            HistoricalOutcomeModel model,
+            int scenarioCount,
+            int randomSeed = 42,
+            double thirdChoiceMinRatio = 1.01,
+            double probabilityUniformBlend = 0.0)
         {
             _model = model;
             _scenarioCount = Math.Max(scenarioCount, 500);
             _random = new Random(randomSeed);
+            _thirdChoiceMinRatio = Math.Clamp(thirdChoiceMinRatio, 0.0, 1.01);
+            _probabilityUniformBlend = Math.Clamp(probabilityUniformBlend, 0.0, 0.35);
         }
 
         public List<Coupon> SelectPortfolio(List<Coupon> candidates, int desiredCount, int minDistance)
@@ -39,7 +48,9 @@ namespace SporTotoFormApp.Services
 
             foreach (var target in CoverageScenarioGenerator.Generate(
                          _model,
-                         Math.Min(desiredCount, 1024)))
+                         Math.Min(desiredCount, 2500),
+                         _thirdChoiceMinRatio,
+                         _probabilityUniformBlend))
             {
                 var targetIndex = candidateIndexByPrediction.GetValueOrDefault(target, -1);
                 if (targetIndex < 0 || used[targetIndex])
@@ -170,7 +181,7 @@ namespace SporTotoFormApp.Services
                     if (prediction[matchIndex] != target[matchIndex])
                     {
                         distance += 1.0 +
-                            _model.GetForPosition(matchIndex).ForSymbol(target[matchIndex]);
+                            GetAdjustedProbabilities(matchIndex).ForSymbol(target[matchIndex]);
                     }
                 }
 
@@ -298,7 +309,7 @@ namespace SporTotoFormApp.Services
         {
             for (var i = 0; i < prediction.Length; i++)
             {
-                var probability = _model.GetForPosition(i).ForSymbol(prediction[i]);
+                var probability = GetAdjustedProbabilities(i).ForSymbol(prediction[i]);
                 var probabilityCap = Math.Max(
                     2,
                     (int)Math.Ceiling((probability + 0.18) * desiredCount));
@@ -333,7 +344,7 @@ namespace SporTotoFormApp.Services
             {
                 var counts = symbolCountsByMatch[i];
                 var chosen = prediction[i];
-                var probabilities = _model.GetForPosition(i);
+                var probabilities = GetAdjustedProbabilities(i);
                 var chosenProbability = probabilities.ForSymbol(chosen);
                 var targetCount = chosenProbability * desiredCount;
                 var minimumTarget = minimumCoverageTargets[i][chosen];
@@ -371,16 +382,16 @@ namespace SporTotoFormApp.Services
 
             for (var left = 0; left < prediction.Length; left++)
             {
-                var leftProbability = _model.GetForPosition(left).ForSymbol(prediction[left]);
-                if (leftProbability < 0.10)
+                var leftProbability = GetAdjustedProbabilities(left).ForSymbol(prediction[left]);
+                if (leftProbability < 0.08)
                 {
                     continue;
                 }
 
                 for (var right = left + 1; right < prediction.Length; right++)
                 {
-                    var rightProbability = _model.GetForPosition(right).ForSymbol(prediction[right]);
-                    if (rightProbability < 0.10)
+                    var rightProbability = GetAdjustedProbabilities(right).ForSymbol(prediction[right]);
+                    if (rightProbability < 0.08)
                     {
                         continue;
                     }
@@ -407,11 +418,11 @@ namespace SporTotoFormApp.Services
 
             for (var i = 0; i < result.Length; i++)
             {
-                var probabilities = _model.GetForPosition(i);
+                var probabilities = GetAdjustedProbabilities(i);
                 foreach (var symbol in new[] { '1', 'X', '2' })
                 {
                     var probability = probabilities.ForSymbol(symbol);
-                    if (probability < 0.10)
+                    if (probability < 0.08)
                     {
                         continue;
                     }
@@ -464,6 +475,26 @@ namespace SporTotoFormApp.Services
             };
         }
 
+        private SymbolProbabilities GetAdjustedProbabilities(int matchIndex)
+        {
+            var probabilities = _model.GetForPosition(matchIndex);
+            if (_probabilityUniformBlend <= 0.0)
+            {
+                return probabilities;
+            }
+
+            return SymbolProbabilities.Normalize(
+                BlendUniform(probabilities.One),
+                BlendUniform(probabilities.Draw),
+                BlendUniform(probabilities.Two));
+        }
+
+        private double BlendUniform(double probability)
+        {
+            return (probability * (1.0 - _probabilityUniformBlend)) +
+                   ((1.0 / 3.0) * _probabilityUniformBlend);
+        }
+
         private List<char[]> SimulateOutcomes()
         {
             var scenarios = new List<char[]>(_scenarioCount);
@@ -472,7 +503,7 @@ namespace SporTotoFormApp.Services
                 var row = new char[15];
                 for (var m = 0; m < 15; m++)
                 {
-                    var p = _model.GetForPosition(m);
+                    var p = GetAdjustedProbabilities(m);
                     var r = _random.NextDouble();
                     row[m] = r < p.One ? '1' : r < p.One + p.Draw ? 'X' : '2';
                 }
@@ -557,9 +588,13 @@ namespace SporTotoFormApp.Services
     {
         public static IReadOnlyList<string> Generate(
             HistoricalOutcomeModel model,
-            int maximumCount)
+            int maximumCount,
+            double thirdChoiceMinRatio = 1.01,
+            double probabilityUniformBlend = 0.0)
         {
             var targetCount = Math.Clamp(maximumCount, 1, 32768);
+            var thirdChoiceThreshold = Math.Clamp(thirdChoiceMinRatio, 0.0, 1.01);
+            var uniformBlend = Math.Clamp(probabilityUniformBlend, 0.0, 0.35);
             var states = new List<CoverageScenarioState>
             {
                 new(string.Empty, 0.0)
@@ -568,15 +603,23 @@ namespace SporTotoFormApp.Services
             for (var matchIndex = 0; matchIndex < 15; matchIndex++)
             {
                 var probabilities = model.GetForPosition(matchIndex);
-                var choices = new[]
+                var choicesByProbability = new[]
                     {
-                        new CoverageChoice('1', probabilities.One),
-                        new CoverageChoice('X', probabilities.Draw),
-                        new CoverageChoice('2', probabilities.Two)
+                        new CoverageChoice('1', BlendUniform(probabilities.One, uniformBlend)),
+                        new CoverageChoice('X', BlendUniform(probabilities.Draw, uniformBlend)),
+                        new CoverageChoice('2', BlendUniform(probabilities.Two, uniformBlend))
                     }
                     .OrderByDescending(x => x.Probability)
-                    .Take(2)
                     .ToArray();
+                var topProbability = choicesByProbability[0].Probability;
+                var thirdProbability = choicesByProbability[2].Probability;
+                var thirdToTopRatio = thirdProbability / Math.Max(topProbability, 1e-12);
+                var includeThirdChoice =
+                    thirdToTopRatio >= thirdChoiceThreshold ||
+                    topProbability <= 0.48 ||
+                    thirdProbability >= 0.18;
+                var choiceCount = includeThirdChoice ? 3 : 2;
+                var choices = choicesByProbability.Take(choiceCount).ToArray();
 
                 states = states
                     .SelectMany(state => choices.Select(choice =>
@@ -590,6 +633,12 @@ namespace SporTotoFormApp.Services
             }
 
             return states.Select(x => x.Prediction).ToList();
+        }
+
+        private static double BlendUniform(double probability, double uniformBlend)
+        {
+            return (probability * (1.0 - uniformBlend)) +
+                   ((1.0 / 3.0) * uniformBlend);
         }
 
         private sealed record CoverageChoice(char Symbol, double Probability);

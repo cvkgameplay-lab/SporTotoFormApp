@@ -31,7 +31,7 @@ namespace SporTotoFormApp.Services
         {
             _view.Log("Pipeline baslatildi.", Color.Cyan);
             _view.Log(
-                $"Dogruluk ayarlari | Kolon: {_options.DesiredCouponCount} | TopK: {_options.InitialTopCandidateLimit} | CesitHavuz: {_options.DiversePrePoolLimit} | MinDist: {_options.MinHammingDistance}/{_options.MinHammingDistanceFinal} | MC: {_options.MonteCarloScenarioCount}",
+                $"Dogruluk ayarlari | Kolon: {_options.DesiredCouponCount} | UcuncuEsik: {_options.ThirdChoiceMinRatio:F2} | Yumusatma: {_options.ProbabilityUniformBlend:F2} | TopK: {_options.InitialTopCandidateLimit} | CesitHavuz: {_options.DiversePrePoolLimit} | MinDist: {_options.MinHammingDistance}/{_options.MinHammingDistanceFinal} | MC: {_options.MonteCarloScenarioCount}",
                 Color.LightSteelBlue);
 
             var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
@@ -46,17 +46,28 @@ namespace SporTotoFormApp.Services
             _view.Log(
                 $"Model kaynagi: {model.Source} | Gecmis sonuc satiri: {model.SampleSize} | Mac bazli DB/Nesine harmani: {(model.UsedCurrentRoundBlend ? "var" : "yok")}",
                 model.SampleSize >= 20 ? Color.LightSteelBlue : Color.Orange);
-            var evaluator = new CouponEvaluationService(model);
+            var weekPatternModel = WeekPatternModel.Create(baseDirectory, model);
+            _view.Log(weekPatternModel.Message, Color.LightSteelBlue);
+            var evaluator = new CouponEvaluationService(
+                model,
+                weekPatternModel,
+                _options);
             var pipelineWatch = Stopwatch.StartNew();
             List<string> evaluationCandidates;
-            if (_options.DesiredCouponCount <= 1024 && model.UsedCurrentRoundBlend)
+            if (_options.DesiredCouponCount <= 2500 && model.UsedCurrentRoundBlend)
             {
+                var systematicCandidateCount = Math.Clamp(
+                    _options.DesiredCouponCount * 24,
+                    5000,
+                    32768);
                 evaluationCandidates = CoverageScenarioGenerator.Generate(
                         model,
-                        _options.DesiredCouponCount)
+                        systematicCandidateCount,
+                        _options.ThirdChoiceMinRatio,
+                        _options.ProbabilityUniformBlend)
                     .ToList();
                 _view.Log(
-                    $"Sistematik ilk-iki senaryo modu: {evaluationCandidates.Count:n0} kolon",
+                    $"Sistematik senaryo modu: {evaluationCandidates.Count:n0} aday | Hedef: {_options.DesiredCouponCount:n0} kolon",
                     Color.Yellow);
             }
             else
@@ -92,6 +103,8 @@ namespace SporTotoFormApp.Services
                     topCandidates.Select(x => x.Prediction),
                     model,
                     _options.DesiredCouponCount,
+                    _options.ThirdChoiceMinRatio,
+                    _options.ProbabilityUniformBlend,
                     evaluationLimit);
 
                 _view.Log(
@@ -400,10 +413,12 @@ namespace SporTotoFormApp.Services
             int desiredCount,
             int minDistance)
         {
-            var monteCarloCandidateLimit = Math.Clamp(desiredCount * 50, 1000, 3000);
+            var monteCarloCandidateLimit = Math.Clamp(desiredCount * 50, 1500, 3000);
             var coverageTargets = CoverageScenarioGenerator.Generate(
                     model,
-                    Math.Min(desiredCount, 1024))
+                    Math.Min(desiredCount, 2500),
+                    _options.ThirdChoiceMinRatio,
+                    _options.ProbabilityUniformBlend)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var coverageCandidates = candidates
                 .Where(x => coverageTargets.Contains(x.prediction))
@@ -429,7 +444,9 @@ namespace SporTotoFormApp.Services
             var optimizer = new MonteCarloPortfolioOptimizer(
                 model,
                 _options.MonteCarloScenarioCount,
-                Random.Shared.Next());
+                Random.Shared.Next(),
+                _options.ThirdChoiceMinRatio,
+                _options.ProbabilityUniformBlend);
             var selected = optimizer.SelectPortfolio(ordered, desiredCount, minDistance);
 
             foreach (var candidate in selected)
@@ -466,6 +483,8 @@ namespace SporTotoFormApp.Services
             IEnumerable<string> rankedCandidates,
             HistoricalOutcomeModel model,
             int systematicScenarioCount,
+            double thirdChoiceMinRatio,
+            double probabilityUniformBlend,
             int targetCount)
         {
             var result = new List<string>(targetCount);
@@ -473,7 +492,9 @@ namespace SporTotoFormApp.Services
 
             foreach (var candidate in CoverageScenarioGenerator.Generate(
                          model,
-                         Math.Min(1024, Math.Max(16, systematicScenarioCount))))
+                         Math.Min(32768, Math.Max(5000, systematicScenarioCount * 4)),
+                         thirdChoiceMinRatio,
+                         probabilityUniformBlend))
             {
                 if (seen.Add(candidate))
                 {
