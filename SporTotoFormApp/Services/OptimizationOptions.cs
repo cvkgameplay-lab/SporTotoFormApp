@@ -2,6 +2,8 @@ namespace SporTotoFormApp.Services
 {
     public sealed class OptimizationOptions
     {
+        private const int MaxPlayableCouponCount = 100;
+
         public int DesiredCouponCount { get; init; }
         public int InitialTopCandidateLimit { get; init; } = 3200000;
         public int DiversePrePoolLimit { get; init; } = 750000;
@@ -34,7 +36,7 @@ namespace SporTotoFormApp.Services
 
             return new OptimizationOptions
             {
-                DesiredCouponCount = Math.Max(desiredCouponCount, 1),
+                DesiredCouponCount = Math.Clamp(desiredCouponCount, 1, MaxPlayableCouponCount),
                 InitialTopCandidateLimit = Math.Max(source.InitialTopCandidateLimit, 1000),
                 DiversePrePoolLimit = Math.Max(source.DiversePrePoolLimit, 1000),
                 ApiBudgetMultiplier = Math.Max(source.ApiBudgetMultiplier, 1),

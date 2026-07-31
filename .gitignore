@@ -1,0 +1,10 @@
+bin/
+obj/
+_build_check/
+*.user
+*.suo
+*.pdb
+*.dll
+*.exe
+*.xlsx
+*.png

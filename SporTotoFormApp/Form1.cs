@@ -3,11 +3,15 @@ using SporTotoFormApp.Data;
 using SporTotoFormApp.Object;
 using SporTotoFormApp.Services;
 using System.Diagnostics;
+using System.Drawing.Drawing2D;
 
 namespace SporTotoFormApp
 {
-    public partial class Form1 : Form, ITestView
+    public partial class Form1 : Form, ITestView, ICounterfactualSearchVisualization
     {
+        private const int CouponUnitCostAmount = 10;
+        private const int MaxPlayableCostAmount = 1000;
+        private const int MaxPlayableCouponCount = MaxPlayableCostAmount / CouponUnitCostAmount;
         private readonly List<ProfileUi> _profiles = [];
         private TabControl _profileTabs = null!;
         private ToolTip _toolTip = null!;
@@ -17,6 +21,8 @@ namespace SporTotoFormApp
         private ContextMenuStrip _currentMatchesMenu = null!;
         private Button _evaluateResultsButton = null!;
         private Button _experimentButton = null!;
+        private Button _parameterAuditButton = null!;
+        private ComboBox _parameterAuditRoundCombo = null!;
         private CurrentRoundInfo? _currentRound;
         private PredictionInsight? _predictionInsight;
         private NesineProgram? _nesineProgram;
@@ -29,7 +35,14 @@ namespace SporTotoFormApp
         private TeamModelEnsembleResult? _teamModelEnsemble;
         private DateTime _experimentModelRefreshedAtUtc = DateTime.MinValue;
         private CancellationTokenSource? _experimentCts;
+        private CancellationTokenSource? _parameterAuditCts;
         private int _experimentRunCounter;
+        private IReadOnlyList<LearnedPredictionStrategyRecommendation> _experimentLearnedStrategies = [];
+        private readonly List<CounterfactualSearchChartPoint> _parameterAuditChartPoints = [];
+        private Form? _parameterAuditChartForm;
+        private PictureBox? _parameterAuditChartPicture;
+        private int? _parameterAuditChartRoundId;
+        private string _parameterAuditChartActual = string.Empty;
 
         public int ProgressBarValue
         {
@@ -65,13 +78,6 @@ namespace SporTotoFormApp
 
         private async void button1_Click(object sender, EventArgs e)
         {
-            var requests = BuildProfileRequests();
-            if (requests.Count == 0)
-            {
-                Log("En az bir profilde kolon sayisi 1 veya daha buyuk olmali.", Color.OrangeRed);
-                return;
-            }
-
             button1.Enabled = false;
             progressBar1.Minimum = 0;
             progressBar1.Value = 0;
@@ -79,6 +85,38 @@ namespace SporTotoFormApp
 
             try
             {
+                var rawLearnedStrategies = await new PredictionRepository()
+                    .LoadRecommendedLearnedStrategiesAsync(_profiles.Count);
+                var learnedStrategies = SelectTrustedLearnedStrategies(
+                        rawLearnedStrategies,
+                        _profiles.Count)
+                    .ToList();
+                var skippedLearnedStrategyCount = rawLearnedStrategies.Count - learnedStrategies.Count;
+                if (skippedLearnedStrategyCount > 0)
+                {
+                    Log(
+                        $"Ogrenilmis strateji elemesi: {skippedLearnedStrategyCount} zayif/tekil kanitli strateji atlandi.",
+                        Color.Orange);
+                }
+
+                if (learnedStrategies.Count > 0)
+                {
+                    Log(
+                        $"Guvenilir ogrenilmis strateji tablosu kullaniliyor: {learnedStrategies.Count} strateji",
+                        Color.LimeGreen);
+                    foreach (var strategy in learnedStrategies.Take(3))
+                    {
+                        Log($"Ogrenilmis strateji | {strategy.Summary}", Color.LightSteelBlue);
+                    }
+                }
+
+                var requests = BuildProfileRequests(learnedStrategies);
+                if (requests.Count == 0)
+                {
+                    Log("En az bir profilde kolon sayisi 1 veya daha buyuk olmali.", Color.OrangeRed);
+                    return;
+                }
+
                 var targetTotal = requests.Sum(x => x.DesiredCouponCount);
                 var combined = new List<Coupon>(targetTotal * 2);
                 var profileNamesByPrediction = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -142,16 +180,23 @@ namespace SporTotoFormApp
                     Log($"Profiller arasi duplicate temizlendi: {duplicateCount}", Color.Orange);
                 }
 
-                var finalCoupons = merged
-                    .OrderByDescending(x => x.Utility)
-                    .Take(targetTotal)
-                    .ToList();
+                var finalCoupons = SelectBalancedFinalCoupons(merged, targetTotal);
 
                 if (finalCoupons.Count < targetTotal)
                 {
                     Log($"Uyari: Hedef toplam {targetTotal}, elde edilen {finalCoupons.Count}.", Color.Orange);
                 }
 
+                ProgressBarMaxValue = Math.Max(finalCoupons.Count, 1);
+                ProgressBarValue = 0;
+                var prizeEstimateService = new MoneyFilterService(
+                    this,
+                    Math.Max(finalCoupons.Count, 1),
+                    requests[0].Options,
+                    _predictionInsight?.MatchProbabilities);
+                await prizeEstimateService.EnrichPrizeEstimatesAsync(finalCoupons);
+
+                LogFinalCouponRiskSummary(finalCoupons);
                 await SaveCombinedOutputsAsync(finalCoupons, targetTotal, profileNamesByPrediction, requests[0].Options);
                 UpdateCurrentMatchMatrix(finalCoupons);
                 ProgressBarValue = finalCoupons.Count;
@@ -184,6 +229,246 @@ namespace SporTotoFormApp
             });
         }
 
+        public void ResetCounterfactualSearchChart(int roundId, string actualResultLine)
+        {
+            InvokeOnUiThread(() =>
+            {
+                _parameterAuditChartRoundId = roundId;
+                _parameterAuditChartActual = actualResultLine;
+                _parameterAuditChartPoints.Clear();
+                EnsureParameterAuditChartForm();
+                RenderParameterAuditChart();
+            });
+        }
+
+        public void ReportCounterfactualSearchPoint(
+            int roundId,
+            double thirdChoiceMinRatio,
+            double probabilityUniformBlend,
+            int couponCount,
+            int bestHitCount,
+            decimal netProfitAmount,
+            double roi,
+            bool foundExact)
+        {
+            InvokeOnUiThread(() =>
+            {
+                if (_parameterAuditChartPicture == null ||
+                    _parameterAuditChartPicture.IsDisposed ||
+                    _parameterAuditChartRoundId != roundId)
+                {
+                    return;
+                }
+
+                _parameterAuditChartPoints.Add(new CounterfactualSearchChartPoint(
+                    roundId,
+                    thirdChoiceMinRatio,
+                    probabilityUniformBlend,
+                    couponCount,
+                    bestHitCount,
+                    netProfitAmount,
+                    roi,
+                    foundExact));
+
+                if (foundExact ||
+                    bestHitCount >= 14 ||
+                    netProfitAmount > 0m ||
+                    _parameterAuditChartPoints.Count <= 200 ||
+                    _parameterAuditChartPoints.Count % 25 == 0)
+                {
+                    RenderParameterAuditChart();
+                }
+            });
+        }
+
+        private void EnsureParameterAuditChartForm()
+        {
+            if (_parameterAuditChartForm != null &&
+                !_parameterAuditChartForm.IsDisposed &&
+                _parameterAuditChartPicture != null &&
+                !_parameterAuditChartPicture.IsDisposed)
+            {
+                if (!_parameterAuditChartForm.Visible)
+                {
+                    _parameterAuditChartForm.Show(this);
+                }
+
+                return;
+            }
+
+            _parameterAuditChartPicture = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(24, 24, 24)
+            };
+
+            _parameterAuditChartForm = new Form
+            {
+                Text = "Parametre Duzlemi",
+                StartPosition = FormStartPosition.Manual,
+                Size = new Size(700, 520),
+                MinimumSize = new Size(560, 420)
+            };
+
+            var screen = Screen.FromControl(this).WorkingArea;
+            var desiredX = Right + 8;
+            var desiredY = Top;
+            if (desiredX + _parameterAuditChartForm.Width > screen.Right)
+            {
+                desiredX = Math.Max(screen.Left, Left + Width - _parameterAuditChartForm.Width);
+                desiredY = Math.Min(screen.Bottom - _parameterAuditChartForm.Height, Bottom + 8);
+            }
+
+            _parameterAuditChartForm.Location = new Point(
+                Math.Clamp(desiredX, screen.Left, Math.Max(screen.Left, screen.Right - _parameterAuditChartForm.Width)),
+                Math.Clamp(desiredY, screen.Top, Math.Max(screen.Top, screen.Bottom - _parameterAuditChartForm.Height)));
+            _parameterAuditChartForm.Controls.Add(_parameterAuditChartPicture);
+            _parameterAuditChartForm.FormClosed += (_, _) =>
+            {
+                _parameterAuditChartPicture?.Image?.Dispose();
+                _parameterAuditChartPicture = null;
+                _parameterAuditChartForm = null;
+            };
+            _parameterAuditChartForm.Show(this);
+        }
+
+        private void RenderParameterAuditChart()
+        {
+            if (_parameterAuditChartPicture == null || _parameterAuditChartPicture.IsDisposed)
+            {
+                return;
+            }
+
+            var width = Math.Max(_parameterAuditChartPicture.ClientSize.Width, 560);
+            var height = Math.Max(_parameterAuditChartPicture.ClientSize.Height, 420);
+            var bitmap = new Bitmap(width, height);
+
+            using (var graphics = Graphics.FromImage(bitmap))
+            using (var titleFont = new Font("Segoe UI", 10, FontStyle.Bold))
+            using (var smallFont = new Font("Segoe UI", 8))
+            using (var axisPen = new Pen(Color.FromArgb(160, 160, 160)))
+            using (var gridPen = new Pen(Color.FromArgb(55, 55, 55)))
+            {
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.Clear(Color.FromArgb(24, 24, 24));
+
+                var plot = new Rectangle(62, 58, width - 96, height - 128);
+                graphics.DrawString(
+                    $"Round {_parameterAuditChartRoundId} | Gercek: {_parameterAuditChartActual} | Nokta: {_parameterAuditChartPoints.Count:n0}",
+                    titleFont,
+                    Brushes.Gainsboro,
+                    14,
+                    14);
+
+                var visiblePoints = _parameterAuditChartPoints.Count > 5000
+                    ? _parameterAuditChartPoints.Skip(_parameterAuditChartPoints.Count - 5000).ToList()
+                    : _parameterAuditChartPoints;
+                if (visiblePoints.Count > 0)
+                {
+                    var best = visiblePoints
+                        .OrderByDescending(x => x.FoundExact)
+                        .ThenByDescending(x => x.BestHitCount)
+                        .ThenByDescending(x => x.NetProfitAmount)
+                        .ThenByDescending(x => x.Roi)
+                        .First();
+                    graphics.DrawString(
+                        $"En iyi: {best.BestHitCount}/15 | Kolon:{best.CouponCount:n0} | Maliyet:{best.CouponCount * CouponUnitCostAmount:n0} TL | Net:{best.NetProfitAmount:n2} TL | ROI:{best.Roi:P1}",
+                        smallFont,
+                        best.NetProfitAmount > 0m ? Brushes.LightCyan : Brushes.LightGray,
+                        14,
+                        34);
+                }
+
+                for (var i = 0; i <= 10; i++)
+                {
+                    var x = plot.Left + (plot.Width * i / 10f);
+                    graphics.DrawLine(gridPen, x, plot.Top, x, plot.Bottom);
+                    graphics.DrawString((1.01 * i / 10.0).ToString("0.00"), smallFont, Brushes.Gray, x - 12, plot.Bottom + 6);
+                }
+
+                for (var i = 0; i <= 7; i++)
+                {
+                    var y = plot.Bottom - (plot.Height * i / 7f);
+                    graphics.DrawLine(gridPen, plot.Left, y, plot.Right, y);
+                    graphics.DrawString((0.35 * i / 7.0).ToString("0.00"), smallFont, Brushes.Gray, 18, y - 7);
+                }
+
+                graphics.DrawRectangle(axisPen, plot);
+                graphics.DrawString("Ucuncu secim esigi", smallFont, Brushes.Gainsboro, plot.Left + (plot.Width / 2) - 56, height - 44);
+                graphics.DrawString("Yumusatma", smallFont, Brushes.Gainsboro, 10, plot.Top - 18);
+
+                foreach (var point in visiblePoints)
+                {
+                    var x = plot.Left + (float)(Math.Clamp(point.ThirdChoiceMinRatio, 0.0, 1.01) / 1.01 * plot.Width);
+                    var y = plot.Bottom - (float)(Math.Clamp(point.ProbabilityUniformBlend, 0.0, 0.35) / 0.35 * plot.Height);
+                    var size = point.FoundExact
+                        ? 8
+                        : point.BestHitCount >= 14
+                            ? 6
+                            : point.BestHitCount >= 13
+                                ? 5
+                                : 3;
+                    var brush = GetParameterAuditPointBrush(point);
+                    graphics.FillEllipse(brush, x - (size / 2f), y - (size / 2f), size, size);
+                }
+
+                DrawParameterAuditLegend(graphics, smallFont, plot.Left, height - 74);
+            }
+
+            var previous = _parameterAuditChartPicture.Image;
+            _parameterAuditChartPicture.Image = bitmap;
+            previous?.Dispose();
+        }
+
+        private static Brush GetParameterAuditPointBrush(CounterfactualSearchChartPoint point)
+        {
+            if (point.FoundExact)
+            {
+                return Brushes.Red;
+            }
+
+            if (point.BestHitCount >= 14)
+            {
+                return Brushes.LimeGreen;
+            }
+
+            if (point.NetProfitAmount > 0m)
+            {
+                return Brushes.DeepSkyBlue;
+            }
+
+            if (point.BestHitCount >= 13)
+            {
+                return Brushes.Orange;
+            }
+
+            return Brushes.DimGray;
+        }
+
+        private static void DrawParameterAuditLegend(
+            Graphics graphics,
+            Font font,
+            int left,
+            int top)
+        {
+            var items = new (Brush Brush, string Text)[]
+            {
+                (Brushes.Red, "15/15"),
+                (Brushes.LimeGreen, "14 bilen"),
+                (Brushes.DeepSkyBlue, "Net kar"),
+                (Brushes.Orange, "13 bilen"),
+                (Brushes.DimGray, "Diger")
+            };
+
+            var x = left;
+            foreach (var item in items)
+            {
+                graphics.FillEllipse(item.Brush, x, top + 5, 9, 9);
+                graphics.DrawString(item.Text, font, Brushes.Gainsboro, x + 14, top);
+                x += 96;
+            }
+        }
+
         private void rtb_log_TextChanged(object sender, EventArgs e)
         {
         }
@@ -191,7 +476,9 @@ namespace SporTotoFormApp
         private async void Form1_Load(object sender, EventArgs e)
         {
             UpdateTotalCouponCount();
-            await LoadCurrentRoundMatchesAsync();
+            var auditRoundLoadTask = LoadParameterAuditRoundChoicesAsync();
+            var currentRoundLoadTask = LoadCurrentRoundMatchesAsync();
+            await Task.WhenAll(auditRoundLoadTask, currentRoundLoadTask);
         }
 
         private void textBox1_TextChanged(object sender, EventArgs e)
@@ -214,6 +501,7 @@ namespace SporTotoFormApp
             try
             {
                 await RefreshHistoricalResultsAndEvaluateRunsAsync();
+                await LoadParameterAuditRoundChoicesAsync();
             }
             catch (Exception ex)
             {
@@ -222,6 +510,105 @@ namespace SporTotoFormApp
             finally
             {
                 _evaluateResultsButton.Enabled = true;
+            }
+        }
+
+        private async void ParameterAuditRoundCombo_DropDown(object? sender, EventArgs e)
+        {
+            if (_parameterAuditRoundCombo.Items.Count > 1)
+            {
+                return;
+            }
+
+            await LoadParameterAuditRoundChoicesAsync();
+        }
+
+        private async void ParameterAuditButton_Click(object? sender, EventArgs e)
+        {
+            if (_parameterAuditCts != null)
+            {
+                _parameterAuditCts.Cancel();
+                _parameterAuditButton.Enabled = false;
+                _parameterAuditButton.Text = "OTOPSI DURDURULUYOR";
+                Log("Parametre otopsisi iptal istendi. Mevcut deneme tamamlaninca duracak.", Color.Orange);
+                return;
+            }
+
+            _parameterAuditCts = new CancellationTokenSource();
+            var cancellationToken = _parameterAuditCts.Token;
+            if (_parameterAuditRoundCombo.Items.Count <= 1)
+            {
+                await LoadParameterAuditRoundChoicesAsync(cancellationToken);
+            }
+
+            var selectedRound = _parameterAuditRoundCombo.SelectedItem as ParameterAuditRoundSelection;
+            var selectedRoundId = selectedRound?.RoundId;
+            var selectedRoundText = selectedRound?.ToString() ?? "Son 4 hafta (toplu)";
+            _parameterAuditButton.Text = "OTOPSIYI DURDUR";
+            _parameterAuditRoundCombo.Enabled = false;
+            _evaluateResultsButton.Enabled = false;
+
+            try
+            {
+                Log($"Parametre otopsisi basladi | Hedef: {selectedRoundText}", Color.DeepSkyBlue);
+                Log("Once tamamlanmis run'lar degerlendiriliyor...", Color.DeepSkyBlue);
+                await RefreshHistoricalResultsAndEvaluateRunsAsync();
+
+                var searchResult = await new CounterfactualParameterSearchService()
+                    .SearchAndStoreAsync(
+                        this,
+                        maxRounds: selectedRoundId.HasValue ? 1 : 4,
+                        roundId: selectedRoundId,
+                        cancellationToken);
+                Log(
+                    $"Geriye donuk otopsi tamam | Hafta:{searchResult.RoundCount} | Grid:{searchResult.InitialFullGridCount:n0} | Denenen:{searchResult.TestedCount:n0} | DB kayit:{searchResult.StoredStrategyCount:n0} | Exact:{searchResult.ExactCount:n0}",
+                    searchResult.StoredStrategyCount > 0 ? Color.LimeGreen : Color.Yellow);
+                foreach (var summary in searchResult.ExactSummaries)
+                {
+                    var isExact = !summary.StartsWith("Exact bulunamadi", StringComparison.OrdinalIgnoreCase);
+                    Log(
+                        isExact
+                            ? $"Paylasilan exact strateji | {summary}"
+                            : $"Otopsi sonucu | {summary}",
+                        isExact ? Color.LimeGreen : Color.Orange);
+                }
+
+                Log("Parametre otopsisi raporu arka planda uretiliyor; timeout olursa otomatik hafif plana gecilecek.", Color.LightSteelBlue);
+                var reportService = new ParameterAuditReportService();
+                var result = await Task.Run(
+                    () => reportService.BuildAsync(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        message => Log(message, Color.LightSteelBlue),
+                        cancellationToken),
+                    cancellationToken);
+
+                Log(
+                    $"Parametre otopsisi tamamlandi | Run:{result.EvaluatedRunCount:n0} | Round:{result.EvaluatedRoundCount:n0} | 15/15 run:{result.PerfectRunCount:n0} | En iyi:{result.BestHitCount}/15",
+                    result.PerfectRunCount > 0 ? Color.LimeGreen : Color.Yellow);
+                Log($"Rapor dosyasi: {result.FilePath}", Color.LightSteelBlue);
+
+                if (File.Exists(result.FilePath))
+                {
+                    Process.Start(new ProcessStartInfo(result.FilePath) { UseShellExecute = true });
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Log("Parametre otopsisi iptal edildi. Bulunmus exact kayitlar varsa DB'de korunur.", Color.Orange);
+            }
+            catch (Exception ex)
+            {
+                Log($"Parametre otopsisi hatasi: {ex.Message}", Color.OrangeRed);
+            }
+            finally
+            {
+                _parameterAuditCts?.Dispose();
+                _parameterAuditCts = null;
+                _parameterAuditButton.Text = "PARAMETRE OTOPSISI";
+                _parameterAuditButton.Enabled = true;
+                _parameterAuditRoundCombo.Enabled = true;
+                _evaluateResultsButton.Enabled = true;
+                await LoadParameterAuditRoundChoicesAsync();
             }
         }
 
@@ -261,6 +648,7 @@ namespace SporTotoFormApp
             {
                 _experimentCts?.Dispose();
                 _experimentCts = null;
+                _experimentLearnedStrategies = [];
                 button1.Enabled = true;
                 _evaluateResultsButton.Enabled = true;
                 _experimentButton.Enabled = true;
@@ -291,6 +679,36 @@ namespace SporTotoFormApp
                 Color.DeepSkyBlue);
 
             var historicalRefreshSucceeded = await RefreshHistoricalResultsAndEvaluateRunsAsync();
+            var rawExperimentStrategies = await new PredictionRepository()
+                .LoadRecommendedLearnedStrategiesAsync(12, cancellationToken);
+            _experimentLearnedStrategies = SelectTrustedLearnedStrategies(
+                    rawExperimentStrategies,
+                    12)
+                .ToList();
+            var skippedExperimentStrategies =
+                rawExperimentStrategies.Count - _experimentLearnedStrategies.Count;
+            if (skippedExperimentStrategies > 0)
+            {
+                Log(
+                    $"Deney modu strateji elemesi: {skippedExperimentStrategies} zayif/tekil kanitli strateji atlandi.",
+                    Color.Orange);
+            }
+
+            if (_experimentLearnedStrategies.Count > 0)
+            {
+                Log(
+                    $"Deney modu otopsi oncelikli stratejileri kullanacak: {_experimentLearnedStrategies.Count} strateji",
+                    Color.LimeGreen);
+                foreach (var strategy in _experimentLearnedStrategies.Take(3))
+                {
+                    Log($"Deney otopsi baz | {strategy.Summary}", Color.LightSteelBlue);
+                }
+            }
+            else
+            {
+                Log("Deney modu icin otopsi stratejisi bulunamadi; UI/default grid ile devam.", Color.Orange);
+            }
+
             await RefreshExperimentPredictionModelAsync(
                 experimentRound,
                 cancellationToken,
@@ -423,24 +841,64 @@ namespace SporTotoFormApp
         private ProfileRunRequest BuildExperimentRequest(int iteration)
         {
             var baseRequest = BuildProfileRequests().First();
-            var options = baseRequest.Options;
-            int[] couponCounts = [256, 512, 1024, 1536, 2048, 2500];
-            double[] thirdChoiceRatios = [0.55, 0.45, 0.35, 0.25, 0.15];
-            double[] uniformBlends = [0.04, 0.08, 0.12, 0.16];
-            double[] patternScoreWeights = [0.25, 0.35, 0.50];
+            var learnedCount = Math.Max(_experimentLearnedStrategies.Count, 1);
+            var learnedIndex = Math.Max(iteration - 1, 0) % learnedCount;
+            var learned = _experimentLearnedStrategies.Count > 0
+                ? _experimentLearnedStrategies[learnedIndex]
+                : null;
+            var options = learned?.Options ?? baseRequest.Options;
+            var learnedCouponCount = Math.Clamp(
+                learned?.CouponCount ?? baseRequest.DesiredCouponCount,
+                1,
+                MaxPlayableCouponCount);
+            var couponCounts = new[]
+                {
+                    learnedCouponCount,
+                    baseRequest.DesiredCouponCount,
+                    MaxPlayableCouponCount,
+                    75,
+                    50,
+                    40,
+                    30,
+                    20,
+                    10,
+                }
+                .Select(x => Math.Clamp(x, 1, MaxPlayableCouponCount))
+                .Distinct()
+                .ToArray();
+            var thirdChoiceRatios = BuildExperimentDoubleValues(
+                options.ThirdChoiceMinRatio,
+                0.15,
+                1.01,
+                0.10,
+                [0.55, 0.35, 0.15]);
+            var uniformBlends = BuildExperimentDoubleValues(
+                options.ProbabilityUniformBlend,
+                0.00,
+                0.35,
+                0.04,
+                [0.04, 0.08, 0.12, 0.16]);
+            var patternScoreWeights = BuildExperimentDoubleValues(
+                options.PatternScoreWeight,
+                0.00,
+                2.00,
+                0.15,
+                [0.25, 0.35, 0.50]);
             var combinationCount =
+                learnedCount *
                 couponCounts.Length *
                 thirdChoiceRatios.Length *
                 uniformBlends.Length *
                 patternScoreWeights.Length;
             var combinationIndex = Math.Max(iteration - 1, 0) % combinationCount;
+            combinationIndex /= learnedCount;
             var couponIndex = combinationIndex % couponCounts.Length;
             combinationIndex /= couponCounts.Length;
             var ratioIndex = combinationIndex % thirdChoiceRatios.Length;
             combinationIndex /= thirdChoiceRatios.Length;
             var blendIndex = combinationIndex % uniformBlends.Length;
             var patternWeightIndex = combinationIndex / uniformBlends.Length;
-            var desiredCouponCount = couponCounts[couponIndex];
+            var desiredCouponCount = Math.Clamp(couponCounts[couponIndex], 1, MaxPlayableCouponCount);
 
             var varied = new OptimizationOptions
             {
@@ -448,8 +906,8 @@ namespace SporTotoFormApp
                 DiversePrePoolLimit = options.DiversePrePoolLimit,
                 ApiBudgetMultiplier = options.ApiBudgetMultiplier,
                 ApiConcurrency = options.ApiConcurrency,
-                MinHammingDistance = 3,
-                MinHammingDistanceFinal = 3,
+                MinHammingDistance = options.MinHammingDistance,
+                MinHammingDistanceFinal = options.MinHammingDistanceFinal,
                 MonteCarloScenarioCount = options.MonteCarloScenarioCount,
                 ThirdChoiceMinRatio = thirdChoiceRatios[ratioIndex],
                 ProbabilityUniformBlend = uniformBlends[blendIndex],
@@ -463,9 +921,31 @@ namespace SporTotoFormApp
             };
 
             return new ProfileRunRequest(
-                $"Deney #{iteration}",
+                learned == null
+                    ? $"Deney #{iteration}"
+                    : $"Deney #{iteration} + OtopsiOncelikli #{learnedIndex + 1}",
                 desiredCouponCount,
                 varied);
+        }
+
+        private static double[] BuildExperimentDoubleValues(
+            double center,
+            double minimum,
+            double maximum,
+            double delta,
+            double[] fallbacks)
+        {
+            return new[]
+                {
+                    center,
+                    center - delta,
+                    center + delta
+                }
+                .Concat(fallbacks)
+                .Select(x => Math.Clamp(x, minimum, maximum))
+                .Select(x => Math.Round(x, 4))
+                .Distinct()
+                .ToArray();
         }
 
         private async Task SaveExperimentRunToDatabaseAsync(
@@ -549,7 +1029,10 @@ namespace SporTotoFormApp
             try
             {
                 Log("Sonucu gelmis tahmin run'lari degerlendiriliyor...", Color.LightSteelBlue);
-                var summaries = await new PredictionRepository().EvaluatePendingRunsAsync();
+                var summaries = await new PredictionRepository().EvaluatePendingRunsAsync(
+                    batchSize: 200,
+                    maxScannedRuns: 5000,
+                    progress: message => Log(message, Color.LightSteelBlue));
                 if (summaries.Count == 0)
                 {
                     Log("Degerlendirilecek tamamlanmis run bulunamadi.", Color.LightSteelBlue);
@@ -684,6 +1167,69 @@ namespace SporTotoFormApp
             {
                 _currentRoundLabel.Text = "Tahmin haftasi maclari alinamadi.";
                 Log($"Tahmin haftasi maclari hatasi: {ex.Message}", Color.OrangeRed);
+            }
+        }
+
+        private async Task LoadParameterAuditRoundChoicesAsync(
+            CancellationToken cancellationToken = default)
+        {
+            if (_parameterAuditRoundCombo == null)
+            {
+                return;
+            }
+
+            var previousRoundId = (_parameterAuditRoundCombo.SelectedItem as ParameterAuditRoundSelection)?.RoundId;
+            try
+            {
+                _parameterAuditRoundCombo.Enabled = false;
+                _parameterAuditRoundCombo.Items.Clear();
+                _parameterAuditRoundCombo.Items.Add(ParameterAuditRoundSelection.LatestGroup);
+
+                var rounds = await new PredictionRepository()
+                    .LoadAvailableCounterfactualBacktestRoundsAsync(100, cancellationToken);
+
+                foreach (var round in rounds)
+                {
+                    _parameterAuditRoundCombo.Items.Add(new ParameterAuditRoundSelection(round));
+                }
+
+                if (_parameterAuditRoundCombo.Items.Count == 1)
+                {
+                    _parameterAuditRoundCombo.SelectedIndex = 0;
+                    Log("Otopsi haftasi listesi bos: Once mac matrisi olan run degerlendirilmis olmali.", Color.Orange);
+                    return;
+                }
+
+                var selectedIndex = 1;
+                if (previousRoundId.HasValue)
+                {
+                    for (var i = 1; i < _parameterAuditRoundCombo.Items.Count; i++)
+                    {
+                        if ((_parameterAuditRoundCombo.Items[i] as ParameterAuditRoundSelection)?.RoundId == previousRoundId)
+                        {
+                            selectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+
+                _parameterAuditRoundCombo.SelectedIndex = selectedIndex;
+                Log($"Otopsi haftasi listesi guncellendi: {rounds.Count:n0} hafta secilebilir.", Color.DimGray);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _parameterAuditRoundCombo.Items.Clear();
+                _parameterAuditRoundCombo.Items.Add(ParameterAuditRoundSelection.LatestGroup);
+                _parameterAuditRoundCombo.SelectedIndex = 0;
+                Log($"Otopsi haftasi listesi yuklenemedi: {ex.Message}", Color.OrangeRed);
+            }
+            finally
+            {
+                _parameterAuditRoundCombo.Enabled = true;
             }
         }
 
@@ -1285,6 +1831,35 @@ namespace SporTotoFormApp
             _experimentButton.Click += ExperimentButton_Click;
             Controls.Add(_experimentButton);
 
+            _parameterAuditButton = new Button
+            {
+                Location = new Point(790, 64),
+                Size = new Size(190, 36),
+                Text = "PARAMETRE OTOPSISI"
+            };
+            _parameterAuditButton.Click += ParameterAuditButton_Click;
+            Controls.Add(_parameterAuditButton);
+
+            var parameterAuditRoundLabel = new Label
+            {
+                Location = new Point(990, 50),
+                Size = new Size(238, 18),
+                Text = "Otopsi Haftasi"
+            };
+            Controls.Add(parameterAuditRoundLabel);
+
+            _parameterAuditRoundCombo = new ComboBox
+            {
+                Location = new Point(990, 73),
+                Size = new Size(238, 23),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                FormattingEnabled = true
+            };
+            _parameterAuditRoundCombo.Items.Add(ParameterAuditRoundSelection.LatestGroup);
+            _parameterAuditRoundCombo.SelectedIndex = 0;
+            _parameterAuditRoundCombo.DropDown += ParameterAuditRoundCombo_DropDown;
+            Controls.Add(_parameterAuditRoundCombo);
+
             BuildCurrentRoundPanel();
 
             rtb_log.Location = new Point(12, 508);
@@ -1358,7 +1933,7 @@ namespace SporTotoFormApp
             };
 
             _profiles.Clear();
-            _profiles.Add(CreateProfileTab("DB Model", 1024, 1, 20));
+            _profiles.Add(CreateProfileTab("DB Model", MaxPlayableCouponCount, 1, 20));
 
             Controls.Add(_profileTabs);
         }
@@ -1374,10 +1949,10 @@ namespace SporTotoFormApp
             var couponCount = AddNumericInput(
                 page,
                 "Kolon Sayisi",
-                "Bu profilden kac kolon uretilecegini belirler.",
+                $"Bu profilden kac kolon uretilecegini belirler. Ust limit: {MaxPlayableCouponCount} kolon / {MaxPlayableCostAmount:n0} TL.",
                 defaultCouponCount,
                 0,
-                2500,
+                MaxPlayableCouponCount,
                 18);
 
             couponCount.ValueChanged += (_, _) => UpdateTotalCouponCount();
@@ -1530,15 +2105,236 @@ namespace SporTotoFormApp
             return numeric;
         }
 
-        private List<ProfileRunRequest> BuildProfileRequests()
+        private static IEnumerable<LearnedPredictionStrategyRecommendation> SelectTrustedLearnedStrategies(
+            IReadOnlyList<LearnedPredictionStrategyRecommendation> strategies,
+            int limit)
         {
-            var result = new List<ProfileRunRequest>(_profiles.Count);
-            foreach (var profile in _profiles)
+            return strategies
+                .Where(IsTrustedLearnedStrategy)
+                .OrderByDescending(x => x.ExactRoundCount)
+                .ThenByDescending(x => x.RobustRoundCount)
+                .ThenByDescending(x => x.RoundCount)
+                .ThenByDescending(x => x.AverageBestHit)
+                .ThenByDescending(x => x.TotalNetProfitAmount)
+                .Take(Math.Max(limit, 1));
+        }
+
+        private static bool IsTrustedLearnedStrategy(
+            LearnedPredictionStrategyRecommendation strategy)
+        {
+            if (strategy.ExactRoundCount >= 2)
             {
-                var desiredCount = DecimalToInt(profile.CouponCount.Value);
-                if (desiredCount <= 0)
+                return true;
+            }
+
+            return strategy.RoundCount >= 2 &&
+                   strategy.RobustRoundCount >= 2 &&
+                   strategy.MaxBestHit >= 14 &&
+                   strategy.AverageBestHit >= 13.0;
+        }
+
+        private static List<Coupon> SelectBalancedFinalCoupons(
+            IReadOnlyList<Coupon> candidates,
+            int targetTotal)
+        {
+            var ordered = candidates
+                .Where(x => NormalizePrediction(x.prediction).Length == 15)
+                .OrderByDescending(x => x.Utility)
+                .ToList();
+            var target = Math.Clamp(targetTotal, 1, MaxPlayableCouponCount);
+            var selected = new List<Coupon>(target);
+            var symbolCounts = new int[15, 3];
+
+            AddBalancedPass(
+                ordered,
+                selected,
+                symbolCounts,
+                target,
+                target >= 30 ? 2 : 1,
+                target >= 10 ? Math.Max(2, (int)Math.Ceiling(target * 0.76)) : target);
+
+            if (selected.Count < target)
+            {
+                AddBalancedPass(
+                    ordered,
+                    selected,
+                    symbolCounts,
+                    target,
+                    1,
+                    target >= 10 ? Math.Max(2, (int)Math.Ceiling(target * 0.86)) : target);
+            }
+
+            if (selected.Count < target)
+            {
+                AddBalancedPass(
+                    ordered,
+                    selected,
+                    symbolCounts,
+                    target,
+                    0,
+                    target);
+            }
+
+            return selected;
+        }
+
+        private static void AddBalancedPass(
+            IReadOnlyList<Coupon> ordered,
+            List<Coupon> selected,
+            int[,] symbolCounts,
+            int target,
+            int minDistance,
+            int maxSameSymbolPerMatch)
+        {
+            var seen = new HashSet<string>(
+                selected.Select(x => NormalizePrediction(x.prediction)),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var coupon in ordered)
+            {
+                if (selected.Count >= target)
+                {
+                    return;
+                }
+
+                var prediction = NormalizePrediction(coupon.prediction);
+                if (!seen.Add(prediction))
                 {
                     continue;
+                }
+
+                if (minDistance > 0 &&
+                    selected.Any(x => Distance(NormalizePrediction(x.prediction), prediction) < minDistance))
+                {
+                    continue;
+                }
+
+                if (ExceedsFinalSymbolCap(prediction, symbolCounts, maxSameSymbolPerMatch))
+                {
+                    continue;
+                }
+
+                coupon.prediction = prediction;
+                selected.Add(coupon);
+                AddFinalSymbolCounts(prediction, symbolCounts);
+            }
+        }
+
+        private static bool ExceedsFinalSymbolCap(
+            string prediction,
+            int[,] symbolCounts,
+            int maxSameSymbolPerMatch)
+        {
+            for (var i = 0; i < prediction.Length; i++)
+            {
+                if (symbolCounts[i, SymbolIndex(prediction[i])] >= maxSameSymbolPerMatch)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void AddFinalSymbolCounts(string prediction, int[,] symbolCounts)
+        {
+            for (var i = 0; i < prediction.Length; i++)
+            {
+                symbolCounts[i, SymbolIndex(prediction[i])]++;
+            }
+        }
+
+        private void LogFinalCouponRiskSummary(IReadOnlyList<Coupon> coupons)
+        {
+            if (coupons.Count == 0)
+            {
+                Log("Final kupon risk ozeti: kupon yok.", Color.OrangeRed);
+                return;
+            }
+
+            var totalSlots = coupons.Count * 15.0;
+            var total1 = coupons.Sum(x => x.prediction.Count(c => c == '1'));
+            var totalX = coupons.Sum(x => x.prediction.Count(c => c == 'X'));
+            var total2 = coupons.Sum(x => x.prediction.Count(c => c == '2'));
+
+            Log(
+                $"Final sembol dagilimi | 1:{total1 / totalSlots:P1} X:{totalX / totalSlots:P1} 2:{total2 / totalSlots:P1}",
+                Color.LightSteelBlue);
+
+            if (total1 / totalSlots > 0.72 ||
+                totalX / totalSlots < 0.10 ||
+                total2 / totalSlots < 0.10)
+            {
+                Log(
+                    "Uyari: Final portfoy sembol dagilimi tek tarafa egilimli. Bu hafta sonucu yorumlarken 15/15 yerine 14+ kapsama ve matrix dagilimini de kontrol et.",
+                    Color.Orange);
+            }
+
+            for (var matchIndex = 0; matchIndex < 15; matchIndex++)
+            {
+                var count1 = coupons.Count(x => x.prediction[matchIndex] == '1');
+                var countX = coupons.Count(x => x.prediction[matchIndex] == 'X');
+                var count2 = coupons.Count(x => x.prediction[matchIndex] == '2');
+                var top = Math.Max(count1, Math.Max(countX, count2));
+                var topRatio = top / (double)coupons.Count;
+
+                if (topRatio >= 0.90 && coupons.Count >= 20)
+                {
+                    Log(
+                        $"{matchIndex + 1}. mac tek sembole yigildi: 1:{count1} X:{countX} 2:{count2}. Bu maci manuel kontrol et.",
+                        Color.Orange);
+                }
+            }
+        }
+
+        private static int Distance(string left, string right)
+        {
+            var diff = 0;
+            for (var i = 0; i < left.Length && i < right.Length; i++)
+            {
+                if (left[i] != right[i])
+                {
+                    diff++;
+                }
+            }
+
+            return diff + Math.Abs(left.Length - right.Length);
+        }
+
+        private static int SymbolIndex(char symbol)
+        {
+            return symbol switch
+            {
+                '1' => 0,
+                'X' => 1,
+                _ => 2
+            };
+        }
+
+        private List<ProfileRunRequest> BuildProfileRequests(
+            IReadOnlyList<LearnedPredictionStrategyRecommendation>? learnedStrategies = null)
+        {
+            var result = new List<ProfileRunRequest>(_profiles.Count);
+            var profileIndex = 0;
+            var remainingCouponBudget = MaxPlayableCouponCount;
+            foreach (var profile in _profiles)
+            {
+                var requestedCount = DecimalToInt(profile.CouponCount.Value);
+                if (requestedCount <= 0)
+                {
+                    continue;
+                }
+
+                if (remainingCouponBudget <= 0)
+                {
+                    Log($"{profile.Name} atlandi: toplam maliyet siniri {MaxPlayableCostAmount:n0} TL / {MaxPlayableCouponCount:n0} kolon doldu.", Color.Orange);
+                    break;
+                }
+
+                var desiredCount = Math.Min(requestedCount, remainingCouponBudget);
+                if (desiredCount < requestedCount)
+                {
+                    Log($"{profile.Name} kolon sayisi maliyet siniri nedeniyle {requestedCount:n0} -> {desiredCount:n0} dusuruldu.", Color.Orange);
                 }
 
                 var i15Min = DecimalToInt(profile.I15Min.Value);
@@ -1573,10 +2369,49 @@ namespace SporTotoFormApp
                     MaxI15WinnerCount = effectiveI15Max
                 };
 
-                result.Add(new ProfileRunRequest(profile.Name, desiredCount, options));
+                var requestName = profile.Name;
+                if (learnedStrategies is { Count: > 0 })
+                {
+                    var learned = learnedStrategies[profileIndex % learnedStrategies.Count];
+                    options = ApplyLearnedStrategyOptions(
+                        learned.Options,
+                        effectiveI15Min,
+                        effectiveI15Max);
+                    requestName = $"{profile.Name} + Ogrenilmis #{(profileIndex % learnedStrategies.Count) + 1}";
+                }
+
+                result.Add(new ProfileRunRequest(requestName, desiredCount, options));
+                remainingCouponBudget -= desiredCount;
+                profileIndex++;
             }
 
             return result;
+        }
+
+        private static OptimizationOptions ApplyLearnedStrategyOptions(
+            OptimizationOptions learned,
+            int effectiveI15Min,
+            int effectiveI15Max)
+        {
+            return new OptimizationOptions
+            {
+                InitialTopCandidateLimit = learned.InitialTopCandidateLimit,
+                DiversePrePoolLimit = learned.DiversePrePoolLimit,
+                ApiBudgetMultiplier = learned.ApiBudgetMultiplier,
+                ApiConcurrency = learned.ApiConcurrency,
+                MinHammingDistance = learned.MinHammingDistance,
+                MinHammingDistanceFinal = learned.MinHammingDistanceFinal,
+                MonteCarloScenarioCount = Math.Max(learned.MonteCarloScenarioCount, 50000),
+                ThirdChoiceMinRatio = learned.ThirdChoiceMinRatio,
+                ProbabilityUniformBlend = learned.ProbabilityUniformBlend,
+                PatternScoreWeight = learned.PatternScoreWeight,
+                WinnerPatternWeight = learned.WinnerPatternWeight,
+                RecentPatternWeight = learned.RecentPatternWeight,
+                PreviousWeekPatternWeight = learned.PreviousWeekPatternWeight,
+                SurpriseBalanceWeight = learned.SurpriseBalanceWeight,
+                MinI15WinnerCount = effectiveI15Min,
+                MaxI15WinnerCount = effectiveI15Max
+            };
         }
 
         private static int DecimalToInt(decimal value)
@@ -1608,7 +2443,7 @@ namespace SporTotoFormApp
         private void UpdateTotalCouponCount()
         {
             var total = _profiles.Sum(x => DecimalToInt(x.CouponCount.Value));
-            textBox1.Text = total.ToString();
+            textBox1.Text = Math.Min(total, MaxPlayableCouponCount).ToString();
         }
 
         private static List<Coupon> DeduplicateCoupons(IEnumerable<Coupon> coupons)
@@ -1780,6 +2615,43 @@ namespace SporTotoFormApp
                 .Where(c => !char.IsWhiteSpace(c))
                 .Select(char.ToUpperInvariant)
                 .ToArray());
+        }
+
+        private sealed record CounterfactualSearchChartPoint(
+            int RoundId,
+            double ThirdChoiceMinRatio,
+            double ProbabilityUniformBlend,
+            int CouponCount,
+            int BestHitCount,
+            decimal NetProfitAmount,
+            double Roi,
+            bool FoundExact);
+
+        private sealed class ParameterAuditRoundSelection
+        {
+            public static readonly ParameterAuditRoundSelection LatestGroup = new(null);
+
+            public ParameterAuditRoundSelection(CounterfactualBacktestRoundChoice? round)
+            {
+                Round = round;
+                RoundId = round?.RoundId;
+            }
+
+            public CounterfactualBacktestRoundChoice? Round { get; }
+            public int? RoundId { get; }
+
+            public override string ToString()
+            {
+                if (Round == null)
+                {
+                    return "Son 4 hafta (toplu)";
+                }
+
+                var roundName = string.IsNullOrWhiteSpace(Round.RoundName)
+                    ? string.Empty
+                    : $" | {Round.RoundName}";
+                return $"Round {Round.RoundId}{roundName} | Gercek:{Round.ActualResultLine} | Run:{Round.SourceRunId}";
+            }
         }
 
         private sealed record ProfileRunRequest(string Name, int DesiredCouponCount, OptimizationOptions Options);

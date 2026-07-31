@@ -102,7 +102,7 @@ namespace SporTotoFormApp.Client
 
                 var kisiSayisi = kisiRaw.Contains("DEVİR", StringComparison.OrdinalIgnoreCase)
                     ? "0"
-                    : ExtractFirstNumberToken(kisiRaw);
+                    : ExtractIntegerToken(kisiRaw);
 
                 results.Add(new BonusResult
                 {
@@ -115,7 +115,7 @@ namespace SporTotoFormApp.Client
             return results;
         }
 
-        private static string ExtractFirstNumberToken(string value)
+        private static string ExtractIntegerToken(string value)
         {
             if (string.IsNullOrWhiteSpace(value))
             {
@@ -123,9 +123,9 @@ namespace SporTotoFormApp.Client
             }
 
             var token = value.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "0";
-            var cleaned = new string(token.Where(c => char.IsDigit(c) || c is '.' or ',').ToArray());
+            var cleaned = new string(token.Where(char.IsDigit).ToArray());
 
-            if (double.TryParse(cleaned.Replace('.', ',').Replace(",", "."), NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+            if (long.TryParse(cleaned, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
             {
                 return Math.Max(parsed, 0).ToString(CultureInfo.InvariantCulture);
             }

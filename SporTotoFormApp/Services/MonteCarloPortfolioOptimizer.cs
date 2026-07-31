@@ -32,7 +32,7 @@ namespace SporTotoFormApp.Services
             }
 
             var maxSameSymbolPerMatch = desiredCount >= 10
-                ? Math.Max((int)Math.Ceiling(desiredCount * 0.82), 1)
+                ? Math.Max((int)Math.Ceiling(desiredCount * 0.74), 1)
                 : desiredCount;
 
             var selectedIndices = new List<int>(desiredCount);
@@ -312,7 +312,7 @@ namespace SporTotoFormApp.Services
                 var probability = GetAdjustedProbabilities(i).ForSymbol(prediction[i]);
                 var probabilityCap = Math.Max(
                     2,
-                    (int)Math.Ceiling((probability + 0.18) * desiredCount));
+                    (int)Math.Ceiling((probability + 0.14) * desiredCount));
                 var allowedCount = Math.Min(maxSameSymbolPerMatch, probabilityCap);
 
                 if (symbolCountsByMatch[i][prediction[i]] >= allowedCount)
@@ -428,7 +428,7 @@ namespace SporTotoFormApp.Services
                     }
 
                     var target = probability >= 0.18
-                        ? (int)Math.Floor(probability * desiredCount * 0.45)
+                        ? (int)Math.Floor(probability * desiredCount * 0.58)
                         : 1;
                     result[i][symbol] = Math.Clamp(target, 1, Math.Max(1, desiredCount / 2));
                 }
@@ -590,11 +590,13 @@ namespace SporTotoFormApp.Services
             HistoricalOutcomeModel model,
             int maximumCount,
             double thirdChoiceMinRatio = 1.01,
-            double probabilityUniformBlend = 0.0)
+            double probabilityUniformBlend = 0.0,
+            double portfolioJitter = 0.0)
         {
             var targetCount = Math.Clamp(maximumCount, 1, 32768);
             var thirdChoiceThreshold = Math.Clamp(thirdChoiceMinRatio, 0.0, 1.01);
             var uniformBlend = Math.Clamp(probabilityUniformBlend, 0.0, 0.35);
+            var jitter = Math.Clamp(portfolioJitter, 0.0, 2.0);
             var states = new List<CoverageScenarioState>
             {
                 new(string.Empty, 0.0)
@@ -623,10 +625,22 @@ namespace SporTotoFormApp.Services
 
                 states = states
                     .SelectMany(state => choices.Select(choice =>
-                        new CoverageScenarioState(
+                    {
+                        var logScore = state.LogProbability +
+                                       Math.Log(Math.Max(choice.Probability, 1e-12));
+                        if (jitter > 0.000001)
+                        {
+                            logScore += BuildDeterministicJitter(
+                                state.Prediction,
+                                matchIndex,
+                                choice.Symbol,
+                                jitter);
+                        }
+
+                        return new CoverageScenarioState(
                             state.Prediction + choice.Symbol,
-                            state.LogProbability +
-                            Math.Log(Math.Max(choice.Probability, 1e-12)))))
+                            logScore);
+                    }))
                     .OrderByDescending(x => x.LogProbability)
                     .Take(targetCount)
                     .ToList();
@@ -639,6 +653,51 @@ namespace SporTotoFormApp.Services
         {
             return (probability * (1.0 - uniformBlend)) +
                    ((1.0 / 3.0) * uniformBlend);
+        }
+
+        private static double BuildDeterministicJitter(
+            string prefix,
+            int matchIndex,
+            char symbol,
+            double jitter)
+        {
+            var unit = BuildDeterministicUnit(prefix, matchIndex, symbol, jitter);
+            return ((unit * 2.0) - 1.0) * jitter;
+        }
+
+        private static double BuildDeterministicUnit(
+            string prefix,
+            int matchIndex,
+            char symbol,
+            double salt)
+        {
+            unchecked
+            {
+                var hash = 14695981039346656037UL;
+
+                void Mix(ulong value)
+                {
+                    hash ^= value;
+                    hash *= 1099511628211UL;
+                }
+
+                foreach (var c in prefix)
+                {
+                    Mix(c);
+                }
+
+                Mix((ulong)(matchIndex + 1));
+                Mix(symbol);
+                Mix((ulong)Math.Round(salt * 10000.0));
+
+                hash ^= hash >> 33;
+                hash *= 0xff51afd7ed558ccdUL;
+                hash ^= hash >> 33;
+                hash *= 0xc4ceb9fe1a85ec53UL;
+                hash ^= hash >> 33;
+
+                return (hash >> 11) * (1.0 / 9007199254740992.0);
+            }
         }
 
         private sealed record CoverageChoice(char Symbol, double Probability);

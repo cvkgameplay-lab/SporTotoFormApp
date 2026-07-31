@@ -12,16 +12,19 @@ namespace SporTotoFormApp.Services
         private readonly ITestView _view;
         private readonly OptimizationOptions _options;
         private readonly IReadOnlyList<SymbolProbabilities>? _currentRoundProbabilities;
+        private readonly IReadOnlyList<string> _forcedEvaluationCandidates;
 
         public MoneyFilterService(
             ITestView view,
             int kolonSayisi,
             OptimizationOptions? uiOverrides = null,
-            IReadOnlyList<SymbolProbabilities>? currentRoundProbabilities = null)
+            IReadOnlyList<SymbolProbabilities>? currentRoundProbabilities = null,
+            IReadOnlyList<string>? forcedEvaluationCandidates = null)
         {
             _view = view;
             _options = OptimizationOptions.Create(kolonSayisi, uiOverrides);
             _currentRoundProbabilities = currentRoundProbabilities;
+            _forcedEvaluationCandidates = NormalizeForcedCandidates(forcedEvaluationCandidates);
         }
 
         public async Task<List<Coupon>> Run(
@@ -111,6 +114,15 @@ namespace SporTotoFormApp.Services
                     $"Dogruluk aday havuzu: {evaluationCandidates.Count:n0}/{evaluationLimit:n0} | Sistematik senaryo + cesitli + yuksek olasilikli adaylar",
                     evaluationCandidates.Count >= evaluationLimit ? Color.Yellow : Color.Orange);
             }
+
+            var forcedAddedCount = AddForcedEvaluationCandidates(evaluationCandidates, _forcedEvaluationCandidates);
+            if (forcedAddedCount > 0)
+            {
+                _view.Log(
+                    $"Backtest hedef adayi havuza eklendi: {forcedAddedCount:n0}",
+                    Color.LightSteelBlue);
+            }
+
             if (manageProgress)
             {
                 _view.ProgressBarMaxValue = _options.DesiredCouponCount;
@@ -130,7 +142,8 @@ namespace SporTotoFormApp.Services
                 evaluatedCoupons,
                 model,
                 _options.DesiredCouponCount,
-                _options.MinHammingDistanceFinal));
+                _options.MinHammingDistanceFinal,
+                _forcedEvaluationCandidates));
             monteCarloWatch.Stop();
             _view.Log($"Monte Carlo/final secim suresi: {monteCarloWatch.Elapsed.TotalSeconds:F1} sn", Color.DeepSkyBlue);
 
@@ -152,6 +165,7 @@ namespace SporTotoFormApp.Services
             }
             if (persistOutputs)
             {
+                await EnrichPrizeEstimatesAsync(selected, manageProgress);
                 ExcelExporter.ExportCouponsToExcel(selected, "Kuponlar.xlsx");
                 WriteCouponsToText(selected);
                 PrintMatchSummary(selected);
@@ -161,6 +175,86 @@ namespace SporTotoFormApp.Services
             pipelineWatch.Stop();
             _view.Log($"Toplam profil suresi: {pipelineWatch.Elapsed.TotalSeconds:F1} sn", Color.LightSteelBlue);
             return selected;
+        }
+
+        public async Task EnrichPrizeEstimatesAsync(
+            List<Coupon> coupons,
+            bool manageProgress = true)
+        {
+            var targets = coupons
+                .Where(x => !string.IsNullOrWhiteSpace(x.prediction) &&
+                            x.prediction.Length == 15 &&
+                            NeedsPrizeEstimate(x.bonus))
+                .ToList();
+            if (targets.Count == 0)
+            {
+                _view.Log("Tahmini ikramiye API kontrolu atlandi: doldurulacak 0 alan yok.", Color.DimGray);
+                return;
+            }
+
+            _view.Log($"Tahmini ikramiye adetleri API'den dolduruluyor: {targets.Count:n0} kupon", Color.DeepSkyBlue);
+
+            var client = new SporTotoClient();
+            var workerCount = Math.Min(Math.Max(_options.ApiConcurrency, 1), targets.Count);
+            var nextIndex = -1;
+            var successCounter = 0;
+            var emptyCounter = 0;
+            var errorCounter = 0;
+            var processedCounter = 0;
+            var progressLogInterval = Math.Max(50, targets.Count / 20);
+
+            var workers = Enumerable.Range(0, workerCount).Select(async _ =>
+            {
+                while (true)
+                {
+                    var index = Interlocked.Increment(ref nextIndex);
+                    if (index >= targets.Count)
+                    {
+                        break;
+                    }
+
+                    var coupon = targets[index];
+                    try
+                    {
+                        var results = await client.SubmitPredictionStringAsync(coupon.prediction.ToLowerInvariant());
+                        if (TryBuildBonus(results, out var bonus))
+                        {
+                            coupon.bonus = bonus;
+                            Interlocked.Increment(ref successCounter);
+                        }
+                        else
+                        {
+                            Interlocked.Increment(ref emptyCounter);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        var errors = Interlocked.Increment(ref errorCounter);
+                        if (errors <= 3 || errors % 50 == 0)
+                        {
+                            _view.Log($"Tahmini ikramiye API hatasi: {errors} | Son hata: {ex.Message}", Color.Crimson);
+                        }
+                    }
+                    finally
+                    {
+                        var done = Interlocked.Increment(ref processedCounter);
+                        if (manageProgress)
+                        {
+                            _view.ProgressBarValue = Math.Min(done, targets.Count);
+                        }
+
+                        if (done == 1 || done % progressLogInterval == 0 || done == targets.Count)
+                        {
+                            _view.Log($"Tahmini ikramiye API islenen: {done:n0}/{targets.Count:n0}", Color.DimGray);
+                        }
+                    }
+                }
+            });
+
+            await Task.WhenAll(workers);
+            _view.Log(
+                $"Tahmini ikramiye API ozet | Doldurulan: {successCounter:n0} | Bos/eksik cevap: {emptyCounter:n0} | Hata: {errorCounter:n0}",
+                errorCounter == 0 && emptyCounter == 0 ? Color.LimeGreen : Color.Orange);
         }
 
         private static List<Coupon> EvaluateCandidatesLocally(
@@ -411,7 +505,8 @@ namespace SporTotoFormApp.Services
             List<Coupon> candidates,
             HistoricalOutcomeModel model,
             int desiredCount,
-            int minDistance)
+            int minDistance,
+            IReadOnlyList<string> forcedPortfolioPredictions)
         {
             var monteCarloCandidateLimit = Math.Clamp(desiredCount * 50, 1500, 3000);
             var coverageTargets = CoverageScenarioGenerator.Generate(
@@ -426,7 +521,14 @@ namespace SporTotoFormApp.Services
             var rankedCandidates = candidates
                 .OrderByDescending(x => x.Utility)
                 .ThenBy(x => ParseDouble(x.bonus.i15));
+            var forcedCandidates = forcedPortfolioPredictions.Count == 0
+                ? Enumerable.Empty<Coupon>()
+                : candidates
+                    .Where(x => forcedPortfolioPredictions.Contains(
+                        x.prediction,
+                        StringComparer.OrdinalIgnoreCase));
             var ordered = coverageCandidates
+                .Concat(forcedCandidates)
                 .Concat(rankedCandidates)
                 .GroupBy(x => x.prediction, StringComparer.OrdinalIgnoreCase)
                 .Select(x => x.First())
@@ -455,6 +557,59 @@ namespace SporTotoFormApp.Services
             }
 
             return selected;
+        }
+
+        private static IReadOnlyList<string> NormalizeForcedCandidates(
+            IReadOnlyList<string>? forcedEvaluationCandidates)
+        {
+            if (forcedEvaluationCandidates is not { Count: > 0 })
+            {
+                return [];
+            }
+
+            return forcedEvaluationCandidates
+                .Select(NormalizePredictionLine)
+                .Where(x => x.Length == 15)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static int AddForcedEvaluationCandidates(
+            List<string> candidates,
+            IReadOnlyList<string> forcedEvaluationCandidates)
+        {
+            if (forcedEvaluationCandidates.Count == 0)
+            {
+                return 0;
+            }
+
+            var seen = new HashSet<string>(candidates, StringComparer.OrdinalIgnoreCase);
+            var added = 0;
+            foreach (var forced in forcedEvaluationCandidates)
+            {
+                if (!seen.Add(forced))
+                {
+                    continue;
+                }
+
+                candidates.Add(forced);
+                added++;
+            }
+
+            return added;
+        }
+
+        private static string NormalizePredictionLine(string? prediction)
+        {
+            if (string.IsNullOrWhiteSpace(prediction))
+            {
+                return string.Empty;
+            }
+
+            return prediction
+                .Trim()
+                .ToUpperInvariant()
+                .Replace('İ', 'I');
         }
 
         private static List<string> EnforceDiversity(IEnumerable<string> candidates, int minDistance, int limit)
@@ -559,6 +714,60 @@ namespace SporTotoFormApp.Services
             }
 
             return ParseInt(item.KisiSayisi);
+        }
+
+        private static bool TryBuildBonus(
+            IEnumerable<BonusResult> results,
+            out Bonus bonus)
+        {
+            bonus = new Bonus();
+            var list = results.ToList();
+
+            if (!TryGetKisiSayisi(list, "15", out var i15) ||
+                !TryGetKisiSayisi(list, "14", out var i14) ||
+                !TryGetKisiSayisi(list, "13", out var i13) ||
+                !TryGetKisiSayisi(list, "12", out var i12))
+            {
+                return false;
+            }
+
+            bonus = new Bonus
+            {
+                i15 = i15.ToString(CultureInfo.InvariantCulture),
+                i14 = i14.ToString(CultureInfo.InvariantCulture),
+                i13 = i13.ToString(CultureInfo.InvariantCulture),
+                i12 = i12.ToString(CultureInfo.InvariantCulture)
+            };
+            return true;
+        }
+
+        private static bool TryGetKisiSayisi(
+            IEnumerable<BonusResult> results,
+            string bilenContains,
+            out int kisiSayisi)
+        {
+            kisiSayisi = 0;
+            var item = results.FirstOrDefault(x => x.Bilen.Contains(bilenContains, StringComparison.OrdinalIgnoreCase));
+            if (item == null)
+            {
+                return false;
+            }
+
+            kisiSayisi = ParseInt(item.KisiSayisi);
+            return true;
+        }
+
+        private static bool NeedsPrizeEstimate(Bonus? bonus)
+        {
+            if (bonus == null)
+            {
+                return true;
+            }
+
+            return ParseInt(bonus.i15) == 0 &&
+                   ParseInt(bonus.i14) == 0 &&
+                   ParseInt(bonus.i13) == 0 &&
+                   ParseInt(bonus.i12) == 0;
         }
 
         private static int ParseInt(string? raw)
